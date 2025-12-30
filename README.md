@@ -213,7 +213,7 @@ See `LICENSE` for full terms.
 ## 👤 Author
 
 **Nathaniel Vipin**  
-Creator & Maintainer — **AI_TASK_AUTO**
+Creator & Maintainer — **AI_Task-Automation**
 
 ---
 
