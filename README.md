@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">🚀 AI_TASK_AUTO</h1>
+  <h1 align="center">🚀 AI_Taks-Automation</h1>
   <p align="center">
     <b>Advanced Python AI Task Automation Framework</b><br>
     <i>One engine. Total control. Intelligent automation.</i>
@@ -8,9 +8,9 @@
 
 ---
 
-## 🧠 What is AI_TASK_AUTO?
+## 🧠 What is AI_Task-Automation?
 
-**AI_TASK_AUTO** is a powerful, modular, and extensible **Python-based AI automation system** that unifies:
+**AI_Task-Automation** is a powerful, modular, and extensible **Python-based AI automation system** that unifies:
 
 🖥️ System control • 🤖 AI reasoning • 🔍 OCR & Vision • 🌐 Web intelligence  
 📊 Data analysis • 🎯 Macros & workflows • 🛡️ Security & utilities
