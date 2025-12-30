@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Assistant UI</title>
+
+<style>
+/* ================= RESET ================= */
+* {
+  box-sizing: border-box;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  height: 100vh;
+  background: radial-gradient(circle at top, #0b1020, #020617);
+  overflow: hidden;
+  color: white;
+}
+
+/* ================= BLOB ================= */
+.blob {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 540px;
+  height: 540px;
+  transform: translate(-50%, -50%);
+  background:
+    radial-gradient(circle at 30% 30%, #ffffff, #7c7cff, #00ffe0);
+  filter: blur(90px);
+  opacity: 0.55;
+  border-radius: 50%;
+  z-index: 0;
+  animation: blobPulse 14s ease-in-out infinite;
+}
+
+@keyframes blobPulse {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); }
+  50% { transform: translate(-50%, -50%) scale(1.08); }
+}
+
+/* ================= LAYOUT ================= */
+.container {
+  position: relative;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+
+/* ================= CARD ================= */
+.card {
+  width: 460px;
+  max-height: 420px;
+  padding: 34px;
+  border-radius: 28px;
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255,255,255,0.10),
+      rgba(255,255,255,0.05)
+    );
+
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+
+  box-shadow:
+    0 60px 160px rgba(0,0,0,0.6),
+    inset 0 1px 0 rgba(255,255,255,0.15);
+
+  overflow-y: auto;
+  animation: cardEnter 1.2s cubic-bezier(.16,1,.3,1);
+}
+
+/* Scrollbar */
+.card::-webkit-scrollbar {
+  width: 6px;
+}
+.card::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.25);
+  border-radius: 4px;
+}
+.card::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes cardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(40px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ================= TEXT ================= */
+.greeting {
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin-bottom: 16px;
+  letter-spacing: -0.01em;
+  animation: textIn 1s cubic-bezier(.16,1,.3,1);
+}
+
+.sub {
+  font-size: 14px;
+  opacity: 0.65;
+  margin-bottom: 26px;
+}
+
+@keyframes textIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ================= INPUT ================= */
+.input-wrap {
+  display: flex;
+  align-items: center;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(0,0,0,0.28);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.08),
+    0 10px 30px rgba(0,0,0,0.35);
+  transition: all 0.3s ease;
+}
+
+.input-wrap:focus-within {
+  box-shadow:
+    inset 0 0 0 1px rgba(140,160,255,0.5),
+    0 0 30px rgba(120,140,255,0.25);
+}
+
+input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: white;
+  font-size: 15px;
+}
+
+input::placeholder {
+  color: rgba(255,255,255,0.45);
+}
+
+/* ================= TEXT REMOVE ================= */
+.fade-out {
+  animation: fadeRemove 0.6s ease forwards;
+}
+
+@keyframes fadeRemove {
+  to {
+    opacity: 0;
+    transform: translateY(-10px);
+    height: 0;
+    margin: 0;
+  }
+}
+</style>
+</head>
+
+<body>
+
+<div class="blob"></div>
+
+<div class="container">
+  <div class="card">
+    <div id="greeting" class="greeting">
+      Hi Jay, welcome to the assistant
+    </div>
+
+    <div id="subtext" class="sub">
+      What can I help you with today?
+    </div>
+
+    <div class="input-wrap">
+      <input id="userInput" placeholder="Type something and press Enter…" />
+    </div>
+  </div>
+</div>
+
+<!-- ================= WEBCHANNEL ================= -->
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script>
+let bridge;
+
+new QWebChannel(qt.webChannelTransport, channel => {
+  bridge = channel.objects.bridge;
+});
+
+const input = document.getElementById("userInput");
+const greeting = document.getElementById("greeting");
+const sub = document.getElementById("subtext");
+const card = document.querySelector(".card");
+
+function fitText(el) {
+  let size = 26;
+  el.style.fontSize = size + "px";
+  while (card.scrollHeight > card.clientHeight && size > 13) {
+    size--;
+    el.style.fontSize = size + "px";
+  }
+}
+
+input.addEventListener("keydown", async e => {
+  if (e.key === "Enter" && input.value.trim()) {
+    const prompt = input.value.trim();
+    input.value = "";
+
+    greeting.classList.add("fade-out");
+    sub.classList.add("fade-out");
+
+    let response = "…";
+    if (bridge) response = await bridge.get_response(prompt);
+
+    setTimeout(() => {
+      greeting.textContent = response;
+      greeting.classList.remove("fade-out");
+      sub.remove();
+      greeting.style.animation = "none";
+      greeting.offsetHeight;
+      greeting.style.animation = "textIn 0.8s cubic-bezier(.16,1,.3,1)";
+      fitText(greeting);
+      card.scrollTop = 0;
+    }, 600);
+  }
+});
+</script>
+
+</body>
+</html>
