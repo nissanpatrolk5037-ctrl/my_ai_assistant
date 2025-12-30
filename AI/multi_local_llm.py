@@ -1,7 +1,7 @@
 import os
 from llama_cpp import Llama
 
-MODEL_DIR = "E:/local_llms"
+MODEL_DIR = "local-llms"
 _llm_cache = {}
 
 def load_model(name, ctx=4096):
@@ -94,3 +94,4 @@ def long_context(prompt):
 
 def supreme_intelligence(prompt):
     return run("qwen3-30b-a3b-q4_k_m.gguf", prompt, max_tokens=1024)
+
