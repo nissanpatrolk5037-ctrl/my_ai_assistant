@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">🚀 AI_Taks-Automation</h1>
+  <h1 align="center">🚀 AI_Task-Automation</h1>
   <p align="center">
     <b>Advanced Python AI Task Automation Framework</b><br>
     <i>One engine. Total control. Intelligent automation.</i>
