@@ -8,29 +8,35 @@ from watchdog.events import FileSystemEventHandler
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+from deep_translator import GoogleTranslator 
 from pdfminer.high_level import extract_text
 from googleapiclient.discovery import build
-from multi_local_llm import run as llm_run
 from datetime import datetime, timedelta
 from PyPDF2 import PdfReader, PdfMerger
 from watchdog.observers import Observer
 from keyboard import press_and_release
 import xml.etree.ElementTree as ET
+from tkinter import messagebox, Tk
 from PIL import Image, ImageGrab
-from urllib.parse import unquote
+from urllib.parse import unquote, quote, urljoin
+from PIL import Image, ImageGrab
 import matplotlib.pyplot as plt
-from functools import lru_cache
+from functools import lru_cache, wraps
 import speech_recognition as sr
+from bleak import BleakScanner
 from bs4 import BeautifulSoup
 from PIL.ExifTags import TAGS
 from memory_manager import *
 from pytube import YouTube
+from docx import Document
 import pygetwindow as gw
 from pathlib import Path
 import sounddevice as sd
 import librosa.display
 from re import findall
+import win32com.client
 import yfinance as yf
+from groq import Groq
 from tqdm import tqdm
 import datetime as dt
 from fpdf import FPDF
@@ -41,6 +47,7 @@ import subprocess
 import webbrowser
 import pyautogui
 import threading
+import pywhatkit
 import pyperclip
 import importlib
 import traceback
@@ -55,20 +62,29 @@ import discord
 import imaplib
 import librosa
 import qrcode
+import pygame
 import shutil
 import psutil
 import urllib
 import socket
+import random
 import ctypes
+import winreg
 import pefile
 import queue
 import magic
 import email
 import boto3
-import spacy
+try:
+    import spacy
+    SPACY_AVAILABLE = True
+except (ImportError, Exception):
+    SPACY_AVAILABLE = False
+    spacy = None
 import sched
 import scipy
 import json
+import nmap
 import time
 import glob
 import sys
@@ -77,58 +93,12 @@ import csv
 import os
 import re
 
-try:
-    import win32com.client  # for Word COM
-except Exception:
-    win32com = None
-
-try:
-    from tkinter import messagebox, Tk
-except Exception:
-    messagebox = None
-    Tk = None
-
-try:
-    import pygame
-except Exception:
-    pygame = None
-
-try:
-    from groq import Groq
-except Exception:
-    Groq = None
-
-try:
-    from bleak import BleakScanner
-except Exception:
-    BleakScanner = None
-
-try:
-    import nmap 
-except Exception:
-    nmap = None
-
-try:
-    from docx import Document
-except Exception:
-    Document = None
-
-try:
-    from deep_translator import GoogleTranslator 
-except Exception:
-    GoogleTranslator = None
-
-try:
-    import pywhatkit
-except Exception:
-    pywhatkit = None
-
-try:
-    import winreg # Windows only
-    import ctypes # Windows only
-except ImportError:
-    winreg = None
-    ctypes = None
+# Add parent directory to path for imports
+if __name__ == "__main__" or True:  # Always add path
+    current_dir = Path(__file__).parent.absolute()
+    parent_dir = current_dir.parent if current_dir.name == "Code" else current_dir
+    if str(parent_dir) not in sys.path:
+        sys.path.insert(0, str(parent_dir))
 
 # -----------------------------
 # Globals
@@ -144,36 +114,49 @@ DISCORD_CHANNEL_ID = 0
 WHATSAPP_TOKEN = ""
 WHATSAPP_PHONE_ID = ""
 MEMORY_FILE = "os_context_memory.json"
-API_KEY = "YOUR_GROQ_API_KEY"
+API_KEY = "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"
 
 audio_queue: "queue.Queue[str]" = queue.Queue()
 
-# -----------------------------
-# Helpers
-# -----------------------------
-
-def skill_wrapper(func):
-    def wrapped(**kwargs):
-        return func(**kwargs)
-    return wrapped
-
-def now():
+# ===============================
+# TIME UTILS
+# ===============================
+def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
-def log(*a):
-    try: print(*a)
-    except: pass
 
-def _kw(kwargs, key, default=None):
+# ===============================
+# SAFE LOGGING
+# ===============================
+def log(*args: Any) -> None:
+    try:
+        print(*args)
+    except Exception:
+        pass
+
+
+# ===============================
+# KWARG HELPER
+# ===============================
+def _kw(kwargs: dict, key: str, default: Any = None) -> Any:
     return kwargs.get(key, default)
 
-def _print_err(*args, **kwargs):
-    # Accept either positional msg or keyword 'msg'
-    msg = args[0] if args else kwargs.get("msg", "")
-    print(f"[ERROR] {msg}")
 
-def _safe_message_box(*args, **kwargs):
-    # Accept either positional (title, text) or keyword args
+# ===============================
+# ERROR PRINTING
+# ===============================
+def _print_err(*args, **kwargs) -> None:
+    msg = args[0] if args else kwargs.get("msg", "")
+    try:
+        print(f"[ERROR] {msg}")
+    except Exception:
+        pass
+
+
+# ===============================
+# SAFE MESSAGE BOX
+# ===============================
+def _safe_message_box(*args, **kwargs) -> None:
     if args:
         title = args[0] if len(args) > 0 else kwargs.get("title", "")
         text = args[1] if len(args) > 1 else kwargs.get("text", "")
@@ -181,132 +164,127 @@ def _safe_message_box(*args, **kwargs):
         title = kwargs.get("title", "")
         text = kwargs.get("text", "")
 
-    if not IS_WINDOWS or messagebox is None or Tk is None:
+    if not IS_WINDOWS or Tk is None or messagebox is None:
         print(f"[MSGBOX] {title}: {text}")
         return
-    root = Tk()
-    root.withdraw()
-    messagebox.showinfo(title, text)
-    root.destroy()
 
+    try:
+        root = Tk()
+        root.withdraw()
+        messagebox.showinfo(title, text)
+        root.destroy()
+    except Exception as e:
+        print(f"[MSGBOX ERROR] {e}")
+
+
+# ===============================
+# HTTP SESSION FACTORY
+# ===============================
 def _make_session() -> requests.Session:
-    s = requests.Session()
+    session = requests.Session()
+
     retries = requests.adapters.Retry(
         total=3,
         backoff_factor=0.5,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset(["GET", "POST"])
     )
-    adapter = requests.adapters.HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
-    s.mount("http://", adapter)
-    s.mount("https://", adapter)
-    s.headers.update({"User-Agent": "OptimizedAssistant/1.0"})
-    return s
+
+    adapter = requests.adapters.HTTPAdapter(
+        max_retries=retries,
+        pool_connections=10,
+        pool_maxsize=10
+    )
+
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    session.headers.update({
+        "User-Agent": "OptimizedAssistant/1.0"
+    })
+
+    return session
+
+HEADERS_LIST = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36"
+]
+
+# ===============================
+# GLOBAL SESSION (SAFE)
+# ===============================
 
 SESSION = _make_session()
 
-
-# -----------------------------
-# Groq Functions
-# -----------------------------
+# ===============================
+# GROQ CLIENT FACTORY
+# ===============================
 
 def _get_groq_client() -> Optional[Any]:
     if Groq is None:
         _print_err("Groq library not available.")
         return None
+
+    if not API_KEY or API_KEY == "YOUR_GROQ_API_KEY":
+        _print_err("Groq API key not configured.")
+        return None
+
     try:
         return Groq(api_key=API_KEY)
     except Exception as e:
         _print_err(f"Failed to initialize Groq client: {e}")
         return None
 
+
+# ===============================
+# GROQ CALL (CACHED)
+# ===============================
 @lru_cache(maxsize=128)
-def groq_call(instructions: str, query: str = None):
+def groq_call(instructions: str, query: Optional[str] = None) -> Optional[str]:
     client = _get_groq_client()
     if client is None:
         return "Groq client not available."
+
     content = instructions if query is None else f"{instructions}\n\n{query}"
+
     models = [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
         "meta-llama/llama-guard-4-12b"
     ]
+
     for model in models:
         try:
-            chat = client.chat.completions.create(
-                messages=[{"role": "user", "content": content}],
+            response = client.chat.completions.create(
                 model=model,
+                messages=[{"role": "user", "content": content}],
                 stream=False,
             )
-            text = (chat.choices[0].message.content or "").replace("**", "")
-            return text
+
+            text = response.choices[0].message.content or ""
+            return text.replace("**", "")
+
         except Exception as e:
             e_str = str(e)
-            if re.search("Rate limit reached for model", e_str):
-                print(f"❌ Rate limit reached for {model}, switching...")
+
+            if re.search(r"rate limit", e_str, re.IGNORECASE):
+                print(f"❌ Rate limit for {model}, switching model...")
                 continue
+
             print(f"[Groq Error] {e_str}")
             return None
+
     print("⚠️ All models exhausted. Try again later.")
     return None
 
+
+# ===============================
+# PUBLIC WRAPPER
+# ===============================
+
 def groq_answer(instructions: str, query: Optional[str] = None) -> str:
-    return groq_call(instructions, query)
-
-# =========================================================
-# SKILL SYSTEM (FULL)
-# =========================================================
-
-def _make_skill_name(*args, **kwargs) -> str:
-    # Accept positional text or keyword 'text'
-    text = args[0] if args else kwargs.get("text", "")
-    clean = re.sub(r"[^a-zA-Z0-9 ]+", "", text.lower())
-    clean = "_".join(clean.split()[:6])
-    digest = hashlib.md5(text.encode()).hexdigest()[:6]
-    return f"{clean}_{digest}"
-
-
-
-# SkillRegistry removed: use `skill.add_skill(name, func)` on the SkillEngine instance
-# (The old SkillRegistry pattern was deprecated in favor of dynamic registration.)
-
-
-class SkillEngine:
-    def __init__(self):
-        self._registry = {}
-
-    def add_skill(self, func, name=None):
-        """Add a function as a skill."""
-        self._registry[name or func.__name__] = func
-
-    def execute(self, skill_name, **kwargs):
-        """Execute a skill with kwargs or positional fallback."""
-        if skill_name not in self._registry:
-            raise KeyError(f"Skill '{skill_name}' not found.")
-
-        func = self._registry[skill_name]
-        sig = inspect.signature(func)
-
-        # Check if function accepts **kwargs
-        accepts_kwargs = any(
-            p.kind == p.VAR_KEYWORD for p in sig.parameters.values()
-        )
-
-        # Prepare positional arguments for non-kwargs functions
-        if not accepts_kwargs:
-            pos_args = []
-            for i, param in enumerate(sig.parameters.values()):
-                if param.name in kwargs:
-                    pos_args.append(kwargs[param.name])
-                elif param.default != inspect.Parameter.empty:
-                    pos_args.append(param.default)
-                else:
-                    raise ValueError(f"Missing argument '{param.name}' for skill '{skill_name}'")
-            return func(*pos_args)
-        else:
-            return func(**kwargs)
-
-skill = SkillEngine()
+    return groq_call(instructions, query) or ""
 
 # =========================================================
 # NLP → MULTI COMMAND REWRITE
@@ -323,68 +301,20 @@ Example:
 → "open_chrome; search cats; copy result; paste_notepad"
 """
 
-import concurrent.futures
-
-def run_task_parallel(user_input: str, max_workers: int = 5):
-    """
-    Run multiple commands in parallel.
-    Uses Groq to rewrite user input into semicolon-separated commands.
-    Auto-creates missing skills if needed.
-    """
-    if not user_input.strip():
-        return
-
-    NLP_INSTRUCTIONS = """
-    You are an AI command planner.
-    Rewrite the user's request into a list of executable commands separated by semicolons (;).
-    Rules:
-    - Each command must be short and executable
-    - Do NOT explain anything
-    - Do NOT number the commands
-    - Use simple verbs
-    - Example:
-    User: Open Chrome then search cats and copy result
-    Output: open chrome; search cats on google; copy result
-    Return ONLY the commands.
-    """
-
-    rewritten = groq_answer(NLP_INSTRUCTIONS, user_input)
-    if not rewritten:
-        _print_err("NLP rewrite failed.")
-        return
-
-    commands = [c.strip() for c in rewritten.split(";") if c.strip()]
-    if not commands:
-        _print_err("No commands produced.")
-        return
-
-    def execute_cmd(cmd):
-        try:
-            executed = skill.execute(cmd, raw_input=user_input)
-            if executed is False:
-                adaptive_auto_coder(cmd)  # auto-learn if missing
-                skill.execute(cmd, raw_input=user_input)
-        except Exception as e:
-            _print_err(f"Task failed: {cmd} → {e}")
-
-    # Run commands in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(execute_cmd, cmd) for cmd in commands]
-        concurrent.futures.wait(futures)
 
 
 
-
-# System Cleanup
-# -----------------------------
 class SystemCleanup:
+
     @staticmethod
     def delete_files_in_folder(folder: str | Path) -> str:
         p = Path(folder)
+
         if not p.exists():
-            return(f"Folder not found: {p}")
-        
+            return f"Folder not found: {p}"
+
         deleted_count = 0
+
         for child in p.iterdir():
             try:
                 if child.is_file() or child.is_symlink():
@@ -395,13 +325,20 @@ class SystemCleanup:
                     deleted_count += 1
             except Exception as e:
                 _print_err(f"Error deleting {child}: {e}")
+
         return f"Deleted {deleted_count} items in {p.name}."
+
 
     @staticmethod
     def run_command(command: str) -> Optional[str]:
         try:
-            # Use shell=True for OS-specific commands (like ipconfig/rd)
-            subprocess.run(command, check=True, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                command,
+                check=True,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
             return f"Command executed successfully: {command.split()[0]}"
         except subprocess.CalledProcessError as e:
             _print_err(f"Command failed: {command} ({e})")
@@ -410,110 +347,181 @@ class SystemCleanup:
             _print_err(f"Command not found: {command.split()[0]}")
             return f"Command not found: {command.split()[0]}"
 
+
     @staticmethod
-    def clean_temp():
+    def clean_temp() -> str:
         temp_folder = None
+
         if IS_WINDOWS:
             temp_folder = os.environ.get("TEMP") or os.environ.get("TMP")
-            # Also clean the Windows-specific system temp if possible
             windir = os.environ.get("WINDIR", "C:\\Windows")
             SystemCleanup.delete_files_in_folder(Path(windir) / "Temp")
+
         elif IS_MACOS:
             temp_folder = os.environ.get("TMPDIR", "/private/tmp")
+
         elif IS_LINUX:
             temp_folder = "/tmp"
 
         if temp_folder and Path(temp_folder).exists():
             SystemCleanup.delete_files_in_folder(temp_folder)
             return f"Cleaned standard temp folder: {temp_folder}"
+
         return "Temp cleanup path not found."
 
 
     @staticmethod
-    def clean_recycled_items():
+    def clean_recycled_items() -> str:
         if IS_WINDOWS:
-            # Clear Windows Recycle Bin (often requires admin)
-            return SystemCleanup.run_command("rd /s /q C:\\$Recycle.Bin")
+            return SystemCleanup.run_command("rd /s /q C:\\$Recycle.Bin") or "Recycle bin cleanup attempted."
+
         elif IS_MACOS:
-            # Clear macOS Trash
             trash_path = Path.home() / ".Trash"
             if trash_path.exists():
                 SystemCleanup.delete_files_in_folder(trash_path)
                 return f"Cleaned macOS Trash: {trash_path.name}"
             return "macOS Trash not found."
+
         elif IS_LINUX:
-            return "Linux trash cleanup requires 'trash-cli' or manual confirmation. Skipped for safety."
+            return "Linux trash cleanup skipped (requires trash-cli or user confirmation)."
+
         return "Recycle/Trash cleanup skipped."
 
 
     @staticmethod
-    def clean_dns_cache():
+    def clean_dns_cache() -> str:
         if IS_WINDOWS:
-            return SystemCleanup.run_command("ipconfig /flushdns")
+            return SystemCleanup.run_command("ipconfig /flushdns") or "DNS flush attempted."
+
         elif IS_MACOS:
             try:
-                subprocess.run("dscacheutil -flushcache", check=True, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return "DNS cache partially flushed (macOS: dscacheutil)."
+                subprocess.run(
+                    "dscacheutil -flushcache",
+                    check=True,
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                return "DNS cache flushed (macOS)."
             except Exception:
                 return "DNS cache flush failed (macOS)."
+
         elif IS_LINUX:
             if shutil.which("systemd-resolve"):
-                return SystemCleanup.run_command("sudo systemd-resolve --flush-caches")
+                return SystemCleanup.run_command("sudo systemd-resolve --flush-caches") or "DNS flush attempted."
             elif shutil.which("nscd"):
-                 return SystemCleanup.run_command("sudo /etc/init.d/nscd restart")
-            return "Linux DNS command not found. Skipped."
+                return SystemCleanup.run_command("sudo /etc/init.d/nscd restart") or "DNS restart attempted."
+            return "Linux DNS service not found. Skipped."
+
         return "DNS cache cleanup skipped."
 
-    @staticmethod
-    def main():
-        """Cross-platform system cleanup entry point."""
-        results = [
-            SystemCleanup.clean_temp(),
-            SystemCleanup.clean_recycled_items(),
-            SystemCleanup.clean_dns_cache()
-        ]
-        # Additional Windows cleanup steps omitted for brevity, see full code if needed.
-        return ("Cleanup complete!")
-def image_generation(**kwargs) -> Optional[Path]:
-    # Accepts: query or raw_input, out_path
-    query = (kwargs.get("query") or kwargs.get("raw_input") or "").strip()
-    out_path = Path(kwargs.get("out_path", Path("Generated_Image.jpg")))
 
-    # Let Groq reduce a prompt like: "create a dog" -> "dog"
-    obj = groq_answer(
-        "Just return the primary object from this query. E.g., 'create a dog' -> 'dog'",
-        query,
-    )
-    obj = (obj or "").strip() or query
-    img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(obj)}"
+    @staticmethod
+    def main() -> str:
+        """Cross-platform system cleanup entry point."""
+        SystemCleanup.clean_temp()
+        SystemCleanup.clean_recycled_items()
+        SystemCleanup.clean_dns_cache()
+        return "Cleanup complete!"
+    
+def image_generation(**kwargs) -> Optional[Path]:
+    """
+    Generate an image using Pollinations AI based on a reduced prompt.
+    Accepts kwargs:
+      - query or raw_input (str)
+      - out_path (str or Path)
+    Returns Path or None
+    """
+
+    # ---------------------------
+    # INPUT HANDLING
+    # ---------------------------
+    query = (kwargs.get("query") or kwargs.get("raw_input") or "").strip()
+    if not query:
+        _print_err("No query provided for image generation.")
+        return None
+
+    out_path = Path(kwargs.get("out_path", "Generated_Image.jpg"))
+
+    # ---------------------------
+    # PROMPT REDUCTION (SAFE)
+    # ---------------------------
     try:
-        with SESSION.get(img_url, stream=True, timeout=15) as r:
-            r.raise_for_status()
+        obj = groq_answer(
+            "Just return the primary object from this query. "
+            "E.g., 'create a dog' -> 'dog'",
+            query,
+        )
+    except Exception:
+        obj = None
+
+    obj = (obj or "").strip() or query
+
+    # ---------------------------
+    # IMAGE DOWNLOAD
+    # ---------------------------
+    img_url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(obj)}"
+
+    try:
+        with SESSION.get(img_url, stream=True, timeout=15) as response:
+            response.raise_for_status()
+
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+
             with open(out_path, "wb") as f:
-                for chunk in r.iter_content(1024 * 32):
+                for chunk in response.iter_content(chunk_size=1024 * 32):
                     if chunk:
                         f.write(chunk)
-        try:
-            Image.open(out_path).verify()
-        except Exception:
-            _print_err("Downloaded file may not be a valid image.")
-        try:
-            Image.open(out_path).show()
-        except Exception:
-            pass
-        return out_path 
+
+        # ---------------------------
+        # IMAGE VALIDATION
+        # ---------------------------
+        if Image is not None:
+            try:
+                Image.open(out_path).verify()
+            except Exception:
+                _print_err("Downloaded file may not be a valid image.")
+
+            # Optional preview (won't crash headless systems)
+            try:
+                Image.open(out_path).show()
+            except Exception:
+                pass
+
+        return out_path
+
     except Exception as e:
         _print_err(f"Failed to download image: {e}")
         return None
 
 
 def image_optimization(**kwargs) -> None:
-    # Accepts: mode, path, output_path, quality, size
+    """
+    Optimize image(s) by resizing, converting to RGB, and saving with reduced quality.
+
+    Accepts kwargs:
+        - mode: 'image' or 'folder'
+        - path: path to image or folder
+        - output_path: optional path for output image
+        - quality: JPEG quality (default 85)
+        - size: tuple (width, height) (default 800x600)
+    """
+    if Image is None:
+        _print_err("PIL library not available. Cannot optimize images.")
+        return
+
     mode = kwargs.get("mode")
     path = kwargs.get("path")
     output_path = kwargs.get("output_path")
     quality = kwargs.get("quality", 85)
     size = tuple(kwargs.get("size", (800, 600)))
+
+    if not path:
+        _print_err("No path provided for optimization.")
+        return
+
+    p = Path(path)
+
     def _optimize_one(in_path: Path, out_path: Path):
         try:
             with Image.open(in_path) as img:
@@ -524,25 +532,38 @@ def image_optimization(**kwargs) -> None:
         except Exception as e:
             _print_err(f"Optimize failed for {in_path}: {e}")
 
-    p = Path(path)
     if mode == "image":
         if not p.exists():
             _print_err(f"Image not found: {p}")
             return
+
         out = Path(output_path) if output_path else p.with_stem(p.stem + "_optimized").with_suffix(".jpg")
         _optimize_one(p, out)
+
     elif mode == "folder":
         if not p.is_dir():
             _print_err(f"Folder not found: {p}")
             return
+
         for img_file in p.iterdir():
             if img_file.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
                 out = img_file.with_stem("resized_" + img_file.stem).with_suffix(".jpg")
                 _optimize_one(img_file, out)
+
     else:
         _print_err("mode must be 'image' or 'folder'.")
 
-def docx_to_pdf(**kwargs):
+def docx_to_pdf(**kwargs) -> str:
+    """
+    Convert a DOCX file to PDF.
+
+    Accepts kwargs:
+        - input_path: required path to DOCX
+        - output_path: optional path for PDF output
+
+    Returns string status message.
+    """
+
     input_path = kwargs.get("input_path")
     output_path = kwargs.get("output_path")
 
@@ -550,9 +571,14 @@ def docx_to_pdf(**kwargs):
         return "Error: input_path is required."
 
     p_in = Path(input_path).resolve()
+    if not p_in.exists():
+        return f"Error: input file not found: {p_in}"
+
     p_out = Path(output_path or p_in.with_suffix(".pdf")).resolve()
 
-    # 1. Windows COM Automation (Requires MS Word)
+    # ---------------------------
+    # 1. Windows COM Automation
+    # ---------------------------
     if IS_WINDOWS and win32com is not None:
         try:
             word = win32com.client.Dispatch("Word.Application")
@@ -563,10 +589,12 @@ def docx_to_pdf(**kwargs):
             word.Quit()
             return f"Saved PDF (Windows COM): {p_out}"
         except Exception as e:
-            # Fall through to subprocess fallback
-            pass 
+            _print_err(f"Windows COM conversion failed: {e}")
+            # Fall through to LibreOffice/OpenOffice fallback
 
-    # 2. Cross-Platform Fallback: LibreOffice/OpenOffice
+    # ---------------------------
+    # 2. Cross-platform Fallback: LibreOffice/OpenOffice
+    # ---------------------------
     try:
         soffice_path = shutil.which("libreoffice") or shutil.which("soffice")
         if soffice_path:
@@ -578,41 +606,76 @@ def docx_to_pdf(**kwargs):
                 str(p_in)
             ]
             subprocess.run(command, check=True, capture_output=True, timeout=60)
+
             if p_out.exists():
                 return f"Saved PDF (LibreOffice): {p_out}"
+            else:
+                _print_err(f"LibreOffice conversion did not produce output file: {p_out}")
 
-    except Exception:
-        pass
-
-    return "Error: Cannot convert document. Requires win32com (Windows) or LibreOffice/soffice (All platforms) to be installed."
-
-def get_crypto_price_coingecko(**kwargs) -> float | None:
-    symbol = (kwargs.get("symbol") or kwargs.get("raw_input") or "").strip().lower()
-    """
-    Fetch crypto price from CoinGecko in USD
-    """
-    symbol = symbol.lower()
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
-    try:
-        resp = requests.get(url).json()
-        return resp[symbol]["usd"]
     except Exception as e:
-        _print_err(f"CoinGecko error: {e}")
+        _print_err(f"LibreOffice conversion failed: {e}")
+
+    return (
+        "Error: Cannot convert document. Requires "
+        "win32com (Windows) or LibreOffice/soffice (all platforms) to be installed."
+    )
+
+def get_crypto_price_coingecko(**kwargs) -> Optional[float]:
+    """
+    Fetch the current price of a cryptocurrency in USD from CoinGecko.
+
+    Accepts kwargs:
+        - symbol or raw_input: crypto id (e.g., 'bitcoin', 'ethereum')
+
+    Returns:
+        - price in USD (float) if successful
+        - None if any error occurs
+    """
+    symbol = (kwargs.get("symbol") or kwargs.get("raw_input") or "").strip().lower()
+    if not symbol:
+        _print_err("No cryptocurrency symbol provided.")
+        return None
+
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
+
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if symbol not in data or "usd" not in data[symbol]:
+            _print_err(f"Symbol not found or no USD price: {symbol}")
+            return None
+
+        return float(data[symbol]["usd"])
+
+    except Exception as e:
+        _print_err(f"CoinGecko API error: {e}")
         return None
 
 
 def track_stock(**kwargs) -> str:
-    # Accepts: symbol, state_file, asset_type
-    symbol = (kwargs.get("symbol") or kwargs.get("raw_input") or "").strip()
-    state_file = kwargs.get("state_file", LAST_PRICE_FILE)
-    asset_type = kwargs.get("asset_type", "stock")
     """
-    Fetch current price, compare with stored last price, update state_file, return a message.
-    asset_type: "stock" or "crypto"
-    """
-    current_price = None
+    Track a stock or crypto price, compare with last stored price, update state_file, return message.
 
-    if asset_type.lower() == "stock":
+    kwargs:
+        - symbol or raw_input: ticker symbol
+        - state_file: Path object to store last price (default LAST_PRICE_FILE)
+        - asset_type: 'stock' or 'crypto' (default 'stock')
+    """
+    symbol = (kwargs.get("symbol") or kwargs.get("raw_input") or "").strip()
+    if not symbol:
+        return "Error: No symbol provided."
+
+    state_file = Path(kwargs.get("state_file", LAST_PRICE_FILE))
+    asset_type = kwargs.get("asset_type", "stock").lower()
+
+    current_price: Optional[float] = None
+
+    # ---------------------------
+    # FETCH CURRENT PRICE
+    # ---------------------------
+    if asset_type == "stock":
         try:
             stock = yf.Ticker(symbol)
             data = stock.history(period="1d", interval="1m")
@@ -623,23 +686,27 @@ def track_stock(**kwargs) -> str:
             _print_err(f"yfinance error: {e}")
             return f"Error fetching stock price for {symbol}."
 
-    elif asset_type.lower() == "crypto":
-        current_price = get_crypto_price_coingecko(symbol)
+    elif asset_type == "crypto":
+        current_price = get_crypto_price_coingecko(symbol=symbol)
         if current_price is None:
             return f"Error fetching crypto price for {symbol}."
 
     else:
         return "Invalid asset_type. Use 'stock' or 'crypto'."
 
-    # Read last price
-    last_price = None
+    # ---------------------------
+    # READ LAST PRICE
+    # ---------------------------
+    last_price: Optional[float] = None
     if state_file.exists():
         try:
             last_price = float(state_file.read_text().strip())
         except Exception:
             last_price = None
 
-    # Prepare message
+    # ---------------------------
+    # PREPARE MESSAGE
+    # ---------------------------
     if last_price is None:
         message = f"First time checking {symbol}. Current price: ${current_price:.2f}"
     elif current_price > last_price:
@@ -649,145 +716,253 @@ def track_stock(**kwargs) -> str:
     else:
         message = f"{symbol} price stayed the same: ${current_price:.2f}"
 
-    # Write new state
+    # ---------------------------
+    # WRITE NEW STATE
+    # ---------------------------
     try:
+        state_file.parent.mkdir(parents=True, exist_ok=True)
         state_file.write_text(str(current_price))
     except Exception as e:
         _print_err(f"Failed to write state file: {e}")
 
     return message
 
-def summarize_clipboard_text(**kwargs):
-    text = pyperclip.paste() or ""
+def summarize_clipboard_text(**kwargs) -> str:
+    """
+    Summarize text from the clipboard using Groq.
+    Returns a concise summary or error message.
+    """
+    try:
+        text = pyperclip.paste() or ""
+    except Exception as e:
+        _print_err(f"Clipboard read failed: {e}")
+        return "Failed to read clipboard."
+
     if not text.strip():
-        return ("No text found in clipboard.")
-    summary = groq_answer("Summarize the following text. Keep it concise.", text)
+        return "No text found in clipboard."
+
+    try:
+        summary = groq_answer(
+            "Summarize the following text. Keep it concise.",
+            text
+        )
+    except Exception as e:
+        _print_err(f"Groq summarization failed: {e}")
+        return "Failed to summarize."
+
     if not summary:
-        return ("Failed to summarize.")
-    return (f"Summary:\n{textwrap(summary, 120)}")
+        return "Failed to summarize."
+
+    # Wrap summary to 120 characters per line
+    wrapped_summary = textwrap.fill(summary, width=120)
+    return f"Summary:\n{wrapped_summary}"
 
 
-def translate_clipboard_text(**kwargs):
+def translate_clipboard_text(**kwargs) -> str:
+    """
+    Translate text from the clipboard to a target language using deep_translator.
+    kwargs:
+        - target_lang: target language code (default 'en')
+    Returns translated text or error message.
+    """
     target_lang = kwargs.get("target_lang", "en")
-    if GoogleTranslator is None:
-        return ("deep_translator not available.")
 
-    text = pyperclip.paste() or ""
+    # Check if deep_translator is available
+    if 'GoogleTranslator' not in globals() or GoogleTranslator is None:
+        _print_err("deep_translator not available.")
+        return "deep_translator not available."
+
+    # Read clipboard
+    try:
+        text = pyperclip.paste() or ""
+    except Exception as e:
+        _print_err(f"Clipboard read failed: {e}")
+        return "Failed to read clipboard."
+
     if not text.strip():
-        return ("No text found in clipboard.")
+        return "No text found in clipboard."
 
-    translated = GoogleTranslator(source="auto", target=target_lang).translate(text)
-    return (f"Translated ({target_lang}):\n{translated}")
+    # Translate
+    try:
+        translated = GoogleTranslator(source="auto", target=target_lang).translate(text)
+    except Exception as e:
+        _print_err(f"Translation failed: {e}")
+        return f"Translation failed to {target_lang}."
+
+    return f"Translated ({target_lang}):\n{translated}"
 
 def enable_game_mode(**kwargs) -> str:
     """
     Enables platform-specific high-performance/game mode settings.
-    This includes Windows GameBar settings, macOS energy policy, and Linux CPU governor settings.
+    Includes Windows GameBar settings, macOS energy policy, and Linux CPU governor settings.
     """
     results = []
 
+    # ---------------------------
+    # WINDOWS SETTINGS
+    # ---------------------------
     if IS_WINDOWS:
-        # Windows: Enable Game Mode setting and set to High Performance power plan
         try:
-            if winreg is None:
+            if 'winreg' not in globals() or winreg is None:
                 raise ImportError("winreg not available (Windows environment expected).")
             
-            # 1. Enable GameBar Auto Game Mode
-            # GUID for High Performance: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+            # Enable GameBar Auto Game Mode
             key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\GameBar")
             winreg.SetValueEx(key, "AllowAutoGameMode", 0, winreg.REG_DWORD, 1)
             winreg.CloseKey(key)
-            
-            # 2. Set High Performance Power Plan
-            subprocess.run("powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", 
-                           check=False, shell=True, capture_output=True, timeout=5)
-            
-            results.append("Windows Game Mode settings enabled and power plan set to High Performance.")
+
+            # Set High Performance Power Plan
+            subprocess.run(
+                "powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
+                check=False,
+                shell=True,
+                capture_output=True,
+                timeout=5
+            )
+            results.append("Windows Game Mode enabled and power plan set to High Performance.")
         except Exception as e:
             _print_err(f"Windows Game Mode activation failed: {e}")
             results.append(f"Windows activation failed: {e}")
-            
+
+    # ---------------------------
+    # MACOS SETTINGS
+    # ---------------------------
     elif IS_MACOS:
-        # macOS: Disable App Nap and set system energy mode to high performance.
         try:
-            # 1. Set System Power Policy for High Performance (Requires admin privileges)
-            # This is complex and often requires a specific power profile utility.
-            # Using the simpler, widely available 'pmset' to prevent display sleep/disk sleep.
-            
             # Prevent display sleep, computer sleep, and disk sleep
-            subprocess.run("sudo pmset -a disablesleep 1", 
-                           check=True, shell=True, capture_output=True, timeout=5)
-            
-            # Optional: Disable App Nap (Requires admin and complex scripting)
+            subprocess.run(
+                "sudo pmset -a disablesleep 1",
+                check=True,
+                shell=True,
+                capture_output=True,
+                timeout=5
+            )
             results.append("macOS performance tweaks activated (sleep disabled).")
         except subprocess.CalledProcessError:
             results.append("macOS: Sudo password required for performance settings. Run manually.")
         except Exception as e:
+            _print_err(f"macOS activation failed: {e}")
             results.append(f"macOS activation failed: {e}")
 
+    # ---------------------------
+    # LINUX SETTINGS
+    # ---------------------------
     elif IS_LINUX:
-        # Linux: Set CPU Governor to 'performance' (Requires root/sudo)
         try:
-            # Find the path to the CPU governor settings
             cpu_paths = list(Path("/sys/devices/system/cpu/").glob("cpu*/cpufreq/scaling_governor"))
             if not cpu_paths:
-                 results.append("Linux CPU governor control paths not found.")
+                results.append("Linux CPU governor control paths not found.")
             else:
-                # Set all available cores to 'performance'
                 for p in cpu_paths:
-                    subprocess.run(f"echo performance | sudo tee {p}", 
-                                   check=True, shell=True, capture_output=True, timeout=5)
+                    subprocess.run(
+                        f"echo performance | sudo tee {p}",
+                        check=True,
+                        shell=True,
+                        capture_output=True,
+                        timeout=5
+                    )
                 results.append("Linux CPU Governor set to 'performance' for all cores.")
         except subprocess.CalledProcessError:
             results.append("Linux: Sudo password required to change CPU governor. Run manually.")
         except Exception as e:
+            _print_err(f"Linux activation failed: {e}")
             results.append(f"Linux activation failed: {e}")
-            
-    else:
-        results.append("System performance mode not supported on this operating system.")
 
-    # Always run cleanup (DNS flush, temp files, etc.) as a final performance step
+    else:
+        results.append("System performance mode not supported on this OS.")
+
+    # ---------------------------
+    # OPTIONAL CLEANUP
+    # ---------------------------
     if 'SystemCleanup' in globals():
-        SystemCleanup.main()
-        results.append("System cleanup performed.")
-    
+        try:
+            SystemCleanup.main()
+            results.append("System cleanup performed.")
+        except Exception as e:
+            _print_err(f"SystemCleanup failed: {e}")
+            results.append("System cleanup failed.")
+
     return "\n".join(results)
 
 
-def merge_pdfs_in_folder(**kwargs):
+def merge_pdfs_in_folder(**kwargs) -> str:
+    """
+    Merge all PDF files in a folder into a single PDF.
+
+    kwargs:
+        - folder_path: path to folder containing PDFs
+        - output_filename: optional output PDF filename (default 'merged_output.pdf')
+
+    Returns status message.
+    """
+    if PdfMerger is None:
+        return "PyPDF2 not available. Cannot merge PDFs."
+
     folder_path = kwargs.get("folder_path")
-    output_filename = kwargs.get("output_filename", "merged_output.pdf")
+    if not folder_path:
+        return "Error: folder_path is required."
+
     folder = Path(folder_path)
+    if not folder.exists() or not folder.is_dir():
+        return f"Error: Folder not found: {folder}"
+
+    output_filename = kwargs.get("output_filename", "merged_output.pdf")
+    out_path = folder / output_filename
+
     pdf_files = sorted([p for p in folder.iterdir() if p.suffix.lower() == ".pdf"])
     if not pdf_files:
-        return ("No PDF files found.")
-    out_path = folder / output_filename
+        return "No PDF files found in folder."
+
     merger = PdfMerger()
     added = []
+
     for pdf in pdf_files:
         try:
             merger.append(str(pdf))
             added.append(pdf.name)
         except Exception as e:
             _print_err(f"Skipped {pdf.name}: {e}")
+
     try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("wb") as f:
             merger.write(f)
     except Exception as e:
         _print_err(f"Failed to write merged PDF: {e}")
         merger.close()
-        return ("Failed to write merged PDF.")
-    merger.close()
-    if added:
-        return (f"Merged PDF saved to: {out_path} (added: {', '.join(added)})")
-    return (f"No PDFs merged.")
+        return "Failed to write merged PDF."
 
-def download_unsplash_wallpapers(**kwargs):
+    merger.close()
+
+    if added:
+        return f"Merged PDF saved to: {out_path} (added: {', '.join(added)})"
+    return "No PDFs merged."
+
+def download_unsplash_wallpapers(**kwargs) -> str:
+    """
+    Download wallpapers from Unsplash.
+
+    kwargs:
+        - query: search query (default "nature")
+        - count: number of images to download (default 5)
+
+    Returns status message.
+    """
     query = kwargs.get("query", "nature")
-    count = int(kwargs.get("count", 5))
+    try:
+        count = max(1, int(kwargs.get("count", 5)))
+    except Exception:
+        count = 5
+
     save_path = Path("unsplash_wallpapers")
-    save_path.mkdir(exist_ok=True)
+    try:
+        save_path.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        _print_err(f"Failed to create directory {save_path}: {e}")
+        return f"Failed to create directory {save_path}"
+
     saved = []
+
     for i in range(count):
         try:
             url = f"https://source.unsplash.com/1920x1080/?{requests.utils.quote(query)}&sig={i}"
@@ -798,92 +973,186 @@ def download_unsplash_wallpapers(**kwargs):
             saved.append(str(fname))
         except Exception as e:
             _print_err(f"Error downloading image {i}: {e}")
+
     if saved:
         return f"Downloaded {len(saved)} images: {saved}"
     return "No images downloaded."
 
-def detect_fake_news(**kwargs):
-    text = kwargs.get("text") or kwargs.get("raw_input") or ""
-    true_and_false = groq_answer("detect whether this information is real or fake", text)
-    return true_and_false
+def detect_fake_news(**kwargs) -> str:
+    """
+    Detect whether the given text is real or fake using Groq.
+
+    kwargs:
+        - text or raw_input: the text to analyze
+
+    Returns:
+        - A string indicating if the text is likely real or fake
+    """
+    text = (kwargs.get("text") or kwargs.get("raw_input") or "").strip()
+    if not text:
+        return "No text provided for analysis."
+
+    try:
+        result = groq_answer("Detect whether this information is real or fake. Respond with 'real' or 'fake'.", text)
+    except Exception as e:
+        _print_err(f"Groq detection failed: {e}")
+        return "Failed to detect fake news."
+
+    if not result:
+        return "Failed to detect fake news."
+
+    return result.strip()
 
 def website_summarizer(**kwargs) -> Optional[str]:
-    url = kwargs.get("url") or kwargs.get("raw_input") or ""
-    try:
-        r = SESSION.get(url, timeout=15)
-        if r.status_code == 200:
-            return groq_answer(
-                "Summarize this HTML. Focus on important content, ignore boilerplate/navigation.",
-                r.text,
-            )
-        else:
-            _print_err(f"HTTP {r.status_code} for {url}")
-            return None
-    except Exception as e:
-        _print_err(f"Request failed: {e}")
+    """
+    Summarize the main content of a website using Groq.
+
+    kwargs:
+        - url or raw_input: the website URL
+
+    Returns:
+        - summary string or None on failure
+    """
+    url = (kwargs.get("url") or kwargs.get("raw_input") or "").strip()
+    if not url:
+        _print_err("No URL provided.")
         return None
 
+    try:
+        r = SESSION.get(url, timeout=15)
+        r.raise_for_status()
+    except Exception as e:
+        _print_err(f"Request failed for {url}: {e}")
+        return None
+
+    try:
+        summary = groq_answer(
+            "Summarize this HTML. Focus on important content, ignore boilerplate/navigation.",
+            r.text
+        )
+    except Exception as e:
+        _print_err(f"Groq summarization failed for {url}: {e}")
+        return None
+
+    if not summary:
+        _print_err(f"Groq returned empty summary for {url}")
+        return None
+
+    return summary.strip()
+
 def get_local_ip(**kwargs) -> str:
+    """
+    Returns the local IP address of the machine.
+    Falls back to '127.0.0.1' on failure.
+    """
+    try:
+        # Attempt to get the IP by connecting to a public DNS (does not send data)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        try:
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+        finally:
+            s.close()
+        return local_ip
+    except Exception as e:
+        _print_err(f"Failed to get local IP: {e}")
+
+    # Fallback to hostname resolution
     try:
         hostname = socket.gethostname()
         local_ip = socket.gethostbyname(hostname)
         return local_ip
-    except Exception:
-        return "127.0.0.1"
+    except Exception as e:
+        _print_err(f"Fallback hostname resolution failed: {e}")
+
+    # Default fallback
+    return "127.0.0.1"
 
 def port_scanner(**kwargs):
-    ip = kwargs.get("ip")
-    ports = kwargs.get("ports", "22-443")
+    """
+    Scan ports on a target IP using nmap.
+
+    kwargs:
+        ip: target IP (default = local IP)
+        ports: port range (default = "22-443")
+    """
+    ip = kwargs.get("ip") or get_local_ip()
+    ports = str(kwargs.get("ports", "22-443"))
+
     if nmap is None:
-        return ("nmap-python not available.")
-    scanner = nmap.PortScanner()
-    if ip is None:
-        ip = get_local_ip()
+        return "nmap-python not available."
+
     try:
-        scanner.scan(ip, ports)
+        scanner = nmap.PortScanner()
+    except Exception as e:
+        _print_err(f"Failed to initialize nmap scanner: {e}")
+        return "Nmap initialization failed."
+
+    try:
+        scanner.scan(hosts=ip, ports=ports, arguments="-T4")
     except Exception as e:
         _print_err(f"Scan failed: {e}")
-        return
+        return f"Scan failed for {ip}."
 
     if ip not in scanner.all_hosts():
-        return (f"{ip} not found in scan results.")
+        return f"{ip} not found in scan results."
 
-    state = scanner[ip].state()
-    if state != "up":
-        return f"{ip} appears {state}"
+    if scanner[ip].state() != "up":
+        return f"{ip} appears {scanner[ip].state()}."
 
-    results = []
+    results = [f"Scan results for {ip} ({ports})"]
+
     for proto in scanner[ip].all_protocols():
         results.append(f"\nProtocol: {proto.upper()}")
-        ports_data = scanner[ip][proto].keys()
-        if ports_data:
-            for port in sorted(ports_data):
-                entry = scanner[ip][proto][port]
-                name = entry.get("name", "unknown").upper()
-                st = entry.get("state", "unknown").capitalize()
-                results.append(f"Port {port} ({name}): {st}")
-        else:
-            results.append("No open ports found in this protocol.")
+
+        ports_data = scanner[ip][proto]
+        if not ports_data:
+            results.append("No open ports found.")
+            continue
+
+        for port in sorted(ports_data):
+            entry = ports_data[port]
+            state = entry.get("state", "unknown").upper()
+            service = entry.get("name", "unknown").upper()
+            results.append(f"Port {port:<5} | {state:<6} | {service}")
+
     return "\n".join(results)
+
 
 
 async def _ble_discover_async(timeout: float = 5.0):
     if BleakScanner is None:
         raise RuntimeError("bleak not available.")
-    devices = await BleakScanner.discover(timeout=timeout)
-    return devices
+    try:
+        devices = await BleakScanner.discover(timeout=timeout)
+        return devices
+    except Exception as e:
+        _print_err(f"BLE discovery async failed: {e}")
+        return []
 
-def get_nearby_devices(**kwargs):
+# ---------------------------
+# Public sync function
+# ---------------------------
+def get_nearby_devices(**kwargs) -> Optional[str]:
+    """
+    Discover nearby BLE devices and return formatted list.
+
+    kwargs:
+        - timeout: scan duration in seconds (default 5.0)
+    """
     timeout = float(kwargs.get("timeout", 5.0))
+
     if BleakScanner is None:
         return "bleak not available."
 
     try:
-        # Handle running loop vs no running loop
+        # Handle running event loop (e.g., Jupyter) vs no loop
         try:
             loop = asyncio.get_running_loop()
-            # If loop exists, use create_task and run_until_complete workaround
-            devices = loop.run_until_complete(_ble_discover_async(timeout=timeout))
+            # Use ensure_future and run until complete workaround
+            future = asyncio.ensure_future(_ble_discover_async(timeout=timeout))
+            devices = loop.run_until_complete(future)
         except RuntimeError:
             # No running loop, safe to use asyncio.run
             devices = asyncio.run(_ble_discover_async(timeout=timeout))
@@ -891,26 +1160,55 @@ def get_nearby_devices(**kwargs):
         if not devices:
             return "No devices found."
 
-        out = [f"Device: {d.name} [{d.address}]" for d in devices]
+        out = [f"Device: {d.name or 'Unknown'} [{d.address}]" for d in devices]
         return "\n".join(out)
 
     except Exception as e:
         _print_err(f"BLE scan failed: {e}")
         return None
 
-def audio_translator_auto(**kwargs):
+def audio_translator_auto(**kwargs) -> str:
+    """
+    Transcribe an audio file, translate it, and optionally play as audio.
+
+    kwargs:
+        - audio_file_path or raw_input: path to audio file
+        - target_language: language code (default 'en')
+        - output_audio_file: temporary audio output file (default 'translated_audio.mp3')
+    """
     audio_file_path = kwargs.get("audio_file_path") or kwargs.get("raw_input")
     target_language = kwargs.get("target_language", "en")
     output_audio_file = kwargs.get("output_audio_file", "translated_audio.mp3")
+
     if GoogleTranslator is None:
         return "deep_translator not available."
+
+    if not audio_file_path or not Path(audio_file_path).exists():
+        return "Error: Audio file not found."
+
     r = sr.Recognizer()
+
     try:
+        # --- Load audio ---
         with sr.AudioFile(audio_file_path) as source:
             audio_data = r.record(source)
-        transcribed_text = r.recognize_google(audio_data)
-        translated_text = GoogleTranslator(source="auto", target=target_language).translate(transcribed_text)
-        # If pygame not available, save text to file and return path
+
+        # --- Transcribe ---
+        try:
+            transcribed_text = r.recognize_google(audio_data)
+        except sr.UnknownValueError:
+            return "Error: Could not understand audio."
+        except sr.RequestError as e:
+            return f"Error: Speech recognition request failed; {e}"
+
+        # --- Translate ---
+        try:
+            translated_text = GoogleTranslator(source="auto", target=target_language).translate(transcribed_text)
+        except Exception as e:
+            _print_err(f"Translation failed: {e}")
+            return "Error: Translation failed."
+
+        # --- If pygame not available, save text to file ---
         if pygame is None:
             try:
                 Path(output_audio_file).write_text(translated_text, encoding="utf-8")
@@ -919,7 +1217,7 @@ def audio_translator_auto(**kwargs):
                 _print_err(f"Failed to save translated text: {e}")
                 return "Failed to save translated text (pygame not installed)."
 
-        # Use gTTS only when available
+        # --- Generate speech using gTTS ---
         try:
             from gtts import gTTS
             tts = gTTS(text=translated_text, lang=target_language, slow=False)
@@ -928,101 +1226,153 @@ def audio_translator_auto(**kwargs):
             _print_err(f"gTTS failed: {e}")
             return "Audio save failed."
 
+        # --- Play audio using pygame ---
         try:
             pygame.mixer.init()
             pygame.mixer.music.load(output_audio_file)
             pygame.mixer.music.play()
-            # Non-blocking wait; allow Ctrl+C to break
             while pygame.mixer.music.get_busy():
                 time.sleep(0.1)
-            # remove file after playback
             try:
                 os.remove(output_audio_file)
             except Exception:
                 pass
-            return (f"Translated Text ({target_language}): {translated_text}")
+            return f"Translated Text ({target_language}): {translated_text}"
         except Exception as e:
             _print_err(f"Could not play audio: {e}")
-            # attempt to remove file anyway
             try:
                 os.remove(output_audio_file)
             except Exception:
                 pass
-            return (f"Translated Text ({target_language}): {translated_text} (could not play audio)")
-    except sr.UnknownValueError:
-        return "Error: Could not understand audio."
-    except sr.RequestError as e:
-        return f"Error: Speech recognition request failed; {e}"
-    except FileNotFoundError:
-        return "Error: Audio file not found."
+            return f"Translated Text ({target_language}): {translated_text} (could not play audio)"
+
     except Exception as e:
         return f"An error occurred during the translation process: {e}"
 
-audio_queue: "queue.Queue[str]" = queue.Queue()
 
 def listen_meeting():
     recognizer = sr.Recognizer()
-    mic = sr.Microphone()
+    try:
+        mic = sr.Microphone()
+    except Exception as e:
+        _print_err(f"Microphone not available: {e}")
+        return
+
     with mic as source:
-        recognizer.adjust_for_ambient_noise(source)
+        try:
+            recognizer.adjust_for_ambient_noise(source)
+        except Exception as e:
+            _print_err(f"Ambient noise adjustment failed: {e}")
 
         while True:
             try:
                 audio = recognizer.listen(source, phrase_time_limit=10)
                 try:
                     text = recognizer.recognize_google(audio)
-                    audio_queue.put(text)
+                    if text.strip():
+                        audio_queue.put(text)
                 except sr.UnknownValueError:
-                    continue
+                    continue  # ignore unrecognized speech
+                except sr.RequestError as e:
+                    _print_err(f"Speech recognition service error: {e}")
             except Exception as e:
                 _print_err(f"Error listening: {e}")
                 break
 
-def summarize_meeting(**kwargs):
-    meeting_text = kwargs.get("meeting_text") or kwargs.get("raw_input") or ""
+# -----------------------
+# Summarize transcript with Groq
+# -----------------------
+def summarize_meeting(**kwargs) -> Dict[str, Any]:
+    """
+    Summarize a meeting transcript into structured JSON.
+
+    Returns:
+        {
+            "key_points": [...],
+            "decisions": [...],
+            "action_items": [...]
+        }
+    """
+    meeting_text = (kwargs.get("meeting_text") or kwargs.get("raw_input") or "").strip()
+    if not meeting_text:
+        return {"key_points": [], "decisions": [], "action_items": []}
+
     prompt = (
         "Summarize the following meeting transcript as JSON with keys: "
         "key_points (list), decisions (list), action_items (list of objects with owner if present). "
         "Return ONLY JSON."
     )
-    structured = groq_answer(prompt, meeting_text)
     try:
+        structured = groq_answer(prompt, meeting_text)
         data = json.loads((structured or "").strip())
-        return data
-    except Exception:
+        # Ensure keys exist
+        return {
+            "key_points": data.get("key_points", []),
+            "decisions": data.get("decisions", []),
+            "action_items": data.get("action_items", [])
+        }
+    except Exception as e:
+        _print_err(f"Failed to parse summary JSON: {e}")
         return {"key_points": [], "decisions": [], "action_items": []}
 
+# -----------------------
+# Process transcripts from queue
+# -----------------------
+def process_transcripts(timeout: float = 10.0) -> Dict[str, Any]:
+    """
+    Collect transcripts from `audio_queue` and summarize.
 
+    Parameters:
+        timeout: seconds to wait for new transcripts before retrying.
 
-def process_transcripts():
+    Returns:
+        structured summary JSON
+    """
     all_text = ""
     while True:
         try:
-            transcript = audio_queue.get(timeout=10)
+            transcript = audio_queue.get(timeout=timeout)
             all_text += transcript + "\n"
-            summary = summarize_meeting(all_text)
+            summary = summarize_meeting(meeting_text=all_text)
             return summary
         except queue.Empty:
             continue
+        except Exception as e:
+            _print_err(f"Error processing transcript: {e}")
+            break
+
+    return {"key_points": [], "decisions": [], "action_items": []}
 
 # -----------------------------
 # OCR helpers
 # -----------------------------
 
 
-def ocr(**kwargs):
+def ocr(**kwargs) -> str:
+    """
+    Perform OCR on an image using OCR.Space API.
+
+    kwargs:
+        - image_path or raw_input: path to the image
+        - api_key: OCR.Space API key
+    """
     image_path = kwargs.get("image_path") or kwargs.get("raw_input")
     api_key = kwargs.get("api_key", "K85328613788957")
+    
+    if not image_path:
+        return "Error: No image path provided."
+
     p = Path(image_path)
     if not p.exists():
         return "Error: image not found."
+
     try:
-        with p.open("rb") as img:
+        with p.open("rb") as img_file:
             r = SESSION.post(
                 "https://api.ocr.space/parse/image",
-                files={"image": img},
+                files={"image": img_file},
                 data={"apikey": api_key, "language": "eng", "OCREngine": "2"},
-                timeout=60,
+                timeout=60
             )
         r.raise_for_status()
     except Exception as e:
@@ -1035,43 +1385,84 @@ def ocr(**kwargs):
 
     if result.get("IsErroredOnProcessing"):
         return "❌ OCR Failed: " + str(result.get("ErrorMessage"))
+
     parsed = result.get("ParsedResults")
     if parsed and parsed[0].get("ParsedText"):
         return parsed[0]["ParsedText"].strip()
+
     return "⚠️ No text found in image."
 
-def ocr_screen(**kwargs):
+def ocr_screen(**kwargs) -> Optional[str]:
+    """
+    Capture the screen, perform OCR, and summarize the text.
+
+    kwargs:
+        - api_key: OCR.Space API key
+    """
     api_key = kwargs.get("api_key", "K85328613788957")
-    # Capture whole screen to temp
+
+    # Capture whole screen to temp file
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         temp_path = Path(tmp.name)
+
     try:
         try:
             img = ImageGrab.grab()
         except Exception:
             return "Screen capture not supported on this system."
+        
         img.save(temp_path)
+
+        # Perform OCR
         text = ocr(image_path=temp_path, api_key=api_key)
-        summary = groq_answer("Describe the content of this text in 1-3 sentences. Do not mention screenshot/image.", text)
+
+        # Summarize OCR text using Groq
+        try:
+            summary = groq_answer(
+                "Describe the content of this text in 1-3 sentences. Do not mention screenshot/image.",
+                text
+            )
+        except Exception as e:
+            _print_err(f"Groq summarization failed: {e}")
+            summary = text  # fallback
+
         return summary
+
     finally:
+        # Always attempt to remove temporary file
         try:
             temp_path.unlink(missing_ok=True)
         except Exception:
             pass
 
-def translate_image(**kwargs):
+def translate_image(**kwargs) -> str:
+    """
+    Extract text from an image using OCR and translate it.
+
+    kwargs:
+        - image_path or raw_input: path to the image
+        - target_lang: language code to translate into (default 'en')
+    """
     image_path = kwargs.get("image_path") or kwargs.get("raw_input")
     target_lang = kwargs.get("target_lang", "en")
+
     if GoogleTranslator is None:
         return "deep_translator not available."
+
+    if not image_path or not Path(image_path).exists():
+        return "Error: Image not found."
+
+    # --- Extract text using OCR ---
     extracted_text = ocr(image_path=image_path)
-    if not (extracted_text or "").strip() or (extracted_text or "").startswith("Error"):
+    if not extracted_text or extracted_text.startswith("Error"):
         return "No readable text found."
+
+    # --- Translate text ---
     try:
         translated = GoogleTranslator(source="auto", target=target_lang).translate(extracted_text)
         return translated
     except Exception as e:
+        _print_err(f"Translation failed: {e}")
         return f"Translation failed: {e}"
 
 # -----------------------------
@@ -1080,66 +1471,105 @@ def translate_image(**kwargs):
 
 def clear_recycle_bin(**kwargs) -> str:
     """
-    Clears the recycled/trashed items on Windows, macOS, and Linux
-    by calling the core cross-platform cleanup method.
+    Clears recycled/trashed items cross-platform.
+    Delegates to SystemCleanup.
     """
-    # We delegate the platform-specific logic to the SystemCleanup class
-    return SystemCleanup.clean_recycled_items()
+    try:
+        return SystemCleanup.clean_recycled_items()
+    except Exception as e:
+        _print_err(f"Failed to clear recycle bin: {e}")
+        return "Error clearing recycle bin."
 
-def lock_screen(**kwargs):
+# -----------------------
+# Lock screen
+# -----------------------
+def lock_screen(**kwargs) -> str:
     """Locks the screen using OS-native methods."""
-    if IS_WINDOWS:
-        try:
-            # Preferred method (fastest)
-            ctypes.windll.user32.LockWorkStation()
-            return "Screen locked (Windows)."
-        except Exception:
-            # Fallback if ctypes fails (requires 'keyboard' module)
-            if press_and_release:
-                press_and_release("win + l")
-                return "Screen locked (Windows, keyboard emulation)."
-            return "Screen locked (Windows, failed to lock)."
-    elif IS_MACOS:
-        try:
-            # Requires Accessibility permissions for scripting
-            command = "osascript -e 'tell application \"System Events\" to keystroke \"q\" using {control down, command down}'"
-            subprocess.run(command, check=True, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return "Screen locked (macOS)."
-        except Exception:
-            return "Error: macOS lock failed. Try enabling scripting/accessibility."
-    elif IS_LINUX:
-        # Check common Linux desktop environment commands
-        if shutil.which("gnome-screensaver-command"):
-            subprocess.run(["gnome-screensaver-command", "-l"], check=False)
-            return "Screen locked (Linux Gnome)."
-        elif shutil.which("loginctl"):
-            subprocess.run(["loginctl", "lock-session"], check=False)
-            return "Screen locked (Linux loginctl)."
-        else:
-            return "Warning: Linux DE lock command not found."
-    return "Lock screen not supported on this OS."
+    try:
+        if IS_WINDOWS:
+            try:
+                ctypes.windll.user32.LockWorkStation()
+                return "Screen locked (Windows)."
+            except Exception:
+                # Fallback with keyboard emulation
+                try:
+                    press_and_release("win + l")
+                    return "Screen locked (Windows, keyboard emulation)."
+                except Exception:
+                    return "Screen lock failed (Windows)."
 
+        elif IS_MACOS:
+            try:
+                # Requires accessibility permissions
+                cmd = 'osascript -e \'tell application "System Events" to keystroke "q" using {control down, command down}\''
+                subprocess.run(cmd, check=True, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return "Screen locked (macOS)."
+            except Exception:
+                return "Error: macOS lock failed. Enable scripting/accessibility."
+
+        elif IS_LINUX:
+            if shutil.which("gnome-screensaver-command"):
+                subprocess.run(["gnome-screensaver-command", "-l"], check=False)
+                return "Screen locked (Linux Gnome)."
+            elif shutil.which("loginctl"):
+                subprocess.run(["loginctl", "lock-session"], check=False)
+                return "Screen locked (Linux loginctl)."
+            else:
+                return "Warning: Linux DE lock command not found."
+
+    except Exception as e:
+        _print_err(f"Lock screen failed: {e}")
+        return "Lock screen not supported on this OS."
+
+# -----------------------
+# Translate text file
+# -----------------------
 def translate_document(**kwargs):
     if GoogleTranslator is None:
-        return ("deep_translator not available.")
+        return "deep_translator not available."
+
     input_file = kwargs.get("input_file")
     output_file = kwargs.get("output_file")
     target_language = kwargs.get("target_language", "en")
+
+    if not input_file or not output_file:
+        return "Error: input_file and output_file are required."
+
     inp = Path(input_file)
     out = Path(output_file)
-    with inp.open("r", encoding="utf-8", errors="ignore") as infile, out.open("w", encoding="utf-8") as outfile:
-        for line in infile:
-            tr = GoogleTranslator(source="auto", target=target_language).translate(line)
-            outfile.write(tr + "\n")
 
+    if not inp.exists():
+        return f"Error: File not found: {inp}"
+
+    try:
+        with inp.open("r", encoding="utf-8", errors="ignore") as infile, \
+             out.open("w", encoding="utf-8") as outfile:
+            for line in infile:
+                try:
+                    tr = GoogleTranslator(source="auto", target=target_language).translate(line)
+                    outfile.write(tr + "\n")
+                except Exception as e:
+                    _print_err(f"Translation failed for line: {e}")
+                    outfile.write(line + "\n")  # fallback: write original line
+        return f"Document translated: {out}"
+    except Exception as e:
+        _print_err(f"translate_document failed: {e}")
+        return "Error translating document."
+
+# -----------------------
+# Shortcut to open browser history (example)
+# -----------------------
 def s_h(**kwargs):
     import webbrowser
-    webbrowser.open("https://www.google.com")
-    time.sleep(2)
     try:
-        press_and_release("ctrl + h")
-    except Exception:
-        pass
+        webbrowser.open("https://www.google.com")
+        time.sleep(2)
+        try:
+            press_and_release("ctrl + h")
+        except Exception:
+            pass
+    except Exception as e:
+        _print_err(f"s_h failed: {e}")
 
 # -----------------------------
 # Natural alarm AI
@@ -1149,6 +1579,7 @@ def s_h(**kwargs):
 def natural_alarm_ai(**kwargs):
     command = kwargs.get("command") or kwargs.get("raw_input") or ""
     message = kwargs.get("message", "Reminder!")
+
     parsed = groq_answer(
         "Extract time from the text below. Return ONLY valid JSON: "
         "either {'hours':int,'minutes':int,'seconds':int} or {'absolute_time':'YYYY-MM-DD HH:MM:SS'}",
@@ -1160,8 +1591,9 @@ def natural_alarm_ai(**kwargs):
     except Exception:
         return f"❌ AI could not parse the time. Raw: {parsed}"
 
-    duration_seconds = 0
     now = dt.datetime.now()
+    duration_seconds = 0
+
     if any(k in data for k in ["hours", "minutes", "seconds"]):
         duration_seconds = data.get("hours", 0) * 3600 + data.get("minutes", 0) * 60 + data.get("seconds", 0)
     elif "absolute_time" in data:
@@ -1174,11 +1606,7 @@ def natural_alarm_ai(**kwargs):
     if duration_seconds <= 0:
         return "❌ Invalid or past time provided."
 
-    target_time = now + dt.timedelta(seconds=duration_seconds)
-
-    # Pre-fetch weather & quote while waiting (non-blocking approach would be threading; keep simple)
-    weather = ""
-    quote = ""
+    # Fetch weather & quote while waiting
     try:
         weather = SESSION.get("https://wttr.in/?format=3", timeout=10).text.strip()
     except Exception:
@@ -1189,10 +1617,9 @@ def natural_alarm_ai(**kwargs):
     except Exception:
         quote = "Stay awesome!"
 
-    # Wait
     time.sleep(duration_seconds)
 
-    # Ring
+    # Ring alarm
     if pygame:
         try:
             pygame.mixer.init()
@@ -1213,113 +1640,93 @@ def natural_alarm_ai(**kwargs):
 
     return "✅ Alarm finished."
 
-# -----------------------------
-# YouTube Summarizer / Downloader / Play
-# -----------------------------
 
+# -----------------------------
+# YouTube Utilities
+# -----------------------------
 def youtube_summarizer(**kwargs):
-    # Basic captions approach (pytube captions may be unreliable)
     try:
         url = kwargs.get("url") or kwargs.get("raw_input") or ""
         yt = YouTube(url)
-        # Try to pull transcript via third-party APIs normally; we attempt description as fallback
         text = yt.description or ""
         if not text.strip():
             return "No captions/description available for this video."
         summary = groq_answer("Summarize the following video description concisely:", text)
         return summary
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {e}"
+
 
 def ytDownloader(**kwargs):
     yt_url = kwargs.get("yt_url") or kwargs.get("raw_input") or ""
     if YouTube is None:
-        print("pytube not available.")
-        return
-    yt = YouTube(yt_url)
-    video = yt.streams.get_highest_resolution()
-    out = video.download()
-    return (f"Downloaded: {out}")
+        return "pytube not available."
+    try:
+        yt = YouTube(yt_url)
+        video = yt.streams.get_highest_resolution()
+        out = video.download()
+        return f"Downloaded: {out}"
+    except Exception as e:
+        return f"Download failed: {e}"
+
 
 def playMusic(**kwargs):
     song_name = kwargs.get("song_name") or kwargs.get("raw_input") or ""
     if pywhatkit is None:
-        return ("pywhatkit not available.")
+        return "pywhatkit not available."
     try:
         pywhatkit.playonyt(song_name)
     except Exception as e:
         _print_err(f"Play failed: {e}")
 
-# -----------------------------
-# QR Code
-# -----------------------------
 
+# -----------------------------
+# QR Code Generator
+# -----------------------------
 def qrCodeGenerator(**kwargs) -> str:
-    """
-    Generates a QR code from text or a link and saves it as a PNG file.
-    The function then attempts to open the generated file using the platform's
-    default application.
-    Requires: 'qrcode' library.
-    """
     input_text_link = kwargs.get("input_text_link") or kwargs.get("raw_input") or ""
-    
     if qrcode is None:
-        return "Error: The 'qrcode' library is not installed."
-    
+        return "Error: 'qrcode' library not installed."
     if not input_text_link.strip():
-        return "Error: No text or link provided to generate QR code."
-        
+        return "Error: No text or link provided."
+
     try:
-        now = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        fname = f"{now}-QrCode.png"
-        output_path = Path(fname).resolve()
-        
-        # 1. QR Code Generation (Cross-platform with 'qrcode' library)
-        qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=15,
-            border=4,
-        )
+        fname = Path(dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "-QrCode.png")
+        qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=15, border=4)
         qr.add_data(input_text_link)
         qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white")
-        img.save(output_path)
-        
-        # 2. Open File (Cross-platform implementation)
+        img.save(fname)
+
+        # Open cross-platform
         try:
             if IS_WINDOWS:
-                os.startfile(str(output_path))
+                os.startfile(str(fname))
             elif IS_MACOS:
-                subprocess.run(["open", str(output_path)], check=False, timeout=5, stderr=subprocess.DEVNULL)
+                subprocess.run(["open", str(fname)], check=False, timeout=5, stderr=subprocess.DEVNULL)
             elif IS_LINUX:
-                # 'xdg-open' is the standard cross-desktop command
-                subprocess.run(["xdg-open", str(output_path)], check=False, timeout=5, stderr=subprocess.DEVNULL)
+                subprocess.run(["xdg-open", str(fname)], check=False, timeout=5, stderr=subprocess.DEVNULL)
             else:
-                return f"Saved QR: {fname}. File opening skipped (unsupported OS)."
-                
-            return (f"Saved QR and opened file: {output_path.name}")
-            
+                return f"Saved QR: {fname.name}. File opening skipped (unsupported OS)."
         except Exception:
-            # Catch errors in subprocess/os.startfile and just return success for saving
-            return (f"Saved QR: {output_path.name}. Could not open file automatically.")
-            
+            return f"Saved QR: {fname.name}. Could not open file automatically."
+
+        return f"Saved QR and opened file: {fname.name}"
     except Exception as e:
         _print_err(f"QR generation failed: {e}")
         return f"QR code generation failed: {e}"
 
-# -----------------------------
-# Read PDF (first page)
-# -----------------------------
 
+# -----------------------------
+# PDF Reader (first page)
+# -----------------------------
 def read_pdf(**kwargs) -> str:
     pdf_file = kwargs.get("pdf_file") or kwargs.get("raw_input")
     try:
         reader = PdfReader(str(pdf_file))
         if not reader.pages:
             return ""
-        page = reader.pages[0]
-        return page.extract_text() or ""
+        return reader.pages[0].extract_text() or ""
     except Exception as e:
         _print_err(f"PDF read failed: {e}")
         return ""
@@ -1332,7 +1739,8 @@ def read_pdf(**kwargs) -> str:
 def organize_files(**kwargs):
     directory = Path(kwargs.get("directory") or kwargs.get("raw_input"))
     if not directory.is_dir():
-        return ("Directory does not exist.")
+        return "Directory does not exist."
+    
     mapping = {
         ("doc", "docx"): "Word",
         ("xls", "xlsx"): "Excel",
@@ -1358,29 +1766,24 @@ def organize_files(**kwargs):
     for item in directory.iterdir():
         if item.is_dir():
             continue
-        ext = item.suffix[1:] if item.suffix else "no_extension"
-        target = directory / target_folder_for(ext)
+        target = directory / target_folder_for(item.suffix[1:])
         target.mkdir(exist_ok=True)
         try:
             shutil.move(str(item), str(target / item.name))
             moved.append(f"{item.name} -> {target.name}/")
         except Exception as e:
             _print_err(f"Move failed for {item}: {e}")
-    if moved:
-        return f"Moved items:\n" + "\n".join(moved)
-    return "No files moved."
+    
+    return f"Moved items:\n" + "\n".join(moved) if moved else "No files moved."
 
 def file_organizer(**kwargs) -> str:
     directory = kwargs.get("directory") or kwargs.get("raw_input")
     if Path(directory).is_dir():
         return organize_files(directory=directory)
     return "The specified directory does not exist."
-
 # -----------------------------
 # Simple transcription
 # -----------------------------
-
-
 def transcribe_audio(**kwargs) -> str:
     file_path = kwargs.get("file_path") or kwargs.get("raw_input")
     r = sr.Recognizer()
@@ -1389,16 +1792,15 @@ def transcribe_audio(**kwargs) -> str:
             audio = r.record(source)
         return r.recognize_google(audio)
     except sr.UnknownValueError:
-        return "Could not understand audio"
+        return "Could not understand audio."
     except sr.RequestError:
-        return "Could not request results"
+        return "Speech recognition request failed."
     except Exception as e:
         return f"Transcription failed: {e}"
 
 # -----------------------------
 # Download images (batch)
 # -----------------------------
-
 
 def download_images(**kwargs):
     image_urls = kwargs.get("image_urls") or kwargs.get("raw_input") or []
@@ -1412,41 +1814,23 @@ def download_images(**kwargs):
             downloaded.append(name)
         except Exception as e:
             _print_err(f"Failed to download {url}: {e}")
-    if downloaded:
-        return (f"Downloaded: {', '.join(downloaded)}")
-    return "No images downloaded."
+    return f"Downloaded: {', '.join(downloaded)}" if downloaded else "No images downloaded."
 
 # -----------------------------
 # Create file from natural text
 # -----------------------------
 
 _FILE_EXT_MAP = {
-    "python file": ".py",
-    "java file": ".java",
-    "text file": ".txt",
-    "html file": ".html",
-    "css file": ".css",
-    "javascript file": ".js",
-    "json file": ".json",
-    "xml file": ".xml",
-    "csv file": ".csv",
-    "markdown file": ".md",
-    "yaml file": ".yaml",
-    "pdf file": ".pdf",
-    "word file": ".docx",
-    "excel file": ".xlsx",
-    "powerpoint file": ".pptx",
-    "zip file": ".zip",
-    "tar file": ".tar",
-    "image file": ".png",
-    "audio file": ".mp3",
-    "video file": ".mp4",
+    "python file": ".py", "java file": ".java", "text file": ".txt", "html file": ".html",
+    "css file": ".css", "javascript file": ".js", "json file": ".json", "xml file": ".xml",
+    "csv file": ".csv", "markdown file": ".md", "yaml file": ".yaml", "pdf file": ".pdf",
+    "word file": ".docx", "excel file": ".xlsx", "powerpoint file": ".pptx", "zip file": ".zip",
+    "tar file": ".tar", "image file": ".png", "audio file": ".mp3", "video file": ".mp4"
 }
 
 def get_file_extension(text: str) -> str:
-    t = text.lower()
     for key, ext in _FILE_EXT_MAP.items():
-        if key in t:
+        if key in text.lower():
             return ext
     return ""
 
@@ -1458,154 +1842,137 @@ def _strip_type_words(text: str) -> str:
     return " ".join(t.split())
 
 def create_file(text: str):
-    selected_ext = get_file_extension(text)
-    core = _strip_type_words(text)
-    name = core if core else "demo"
-    p = Path(f"{name}{selected_ext}")
+    ext = get_file_extension(text)
+    name = _strip_type_words(text) or "demo"
+    p = Path(f"{name}{ext}")
     p.touch(exist_ok=True)
-    return (f"Created: {p.resolve()}")
+    return f"Created: {p.resolve()}"
+
 
 # -----------------------------
 # Top processes
 # -----------------------------
 
-
-def get_top_processes(num_processes: int = 3) -> List[Tuple[str, float, int]]:
-    processes: List[Tuple[str, float, int]] = []
+def get_top_processes(num_processes: int = 3):
+    procs = []
     for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info"]):
         try:
-            cpu = proc.info.get("cpu_percent", 0.0) or 0.0
-            mem = getattr(proc.info.get("memory_info", None), "rss", 0)
             name = proc.info.get("name") or f"pid-{proc.info.get('pid')}"
-            processes.append((name, float(cpu), int(mem)))
+            cpu = float(proc.info.get("cpu_percent") or 0.0)
+            mem = getattr(proc.info.get("memory_info"), "rss", 0)
+            procs.append((name, cpu, mem))
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    processes.sort(key=lambda p: (p[1], p[2]), reverse=True)
-    return processes[:num_processes]
+    procs.sort(key=lambda p: (p[1], p[2]), reverse=True)
+    return procs[:num_processes]
 
 def display_top_processes():
-    lines = []
-    for name, cpu, mem in get_top_processes():
-        lines.append(f"Process: {name}, CPU: {int(cpu)}%, Memory: {int(mem / (1024 * 1024))} MB")
+    lines = [f"Process: {n}, CPU: {int(c)}%, Memory: {int(m / (1024*1024))} MB"
+             for n, c, m in get_top_processes()]
     return "\n".join(lines) if lines else "No processes to display."
+
 
 # -----------------------------
 # Wallpaper
 # -----------------------------
 
 def change_wallpaper(*args, **kwargs) -> str:
-    """
-    Changes the desktop wallpaper across Windows, macOS, and Linux
-    using platform-specific system calls or commands.
-    """
-    # 1. Get the image path argument
-    if args:
-        image_path = args[0]
-    else:
-        image_path = kwargs.get("image_path") or kwargs.get("raw_input")
-        
+    image_path = args[0] if args else kwargs.get("image_path") or kwargs.get("raw_input")
     if not image_path:
         return "Error: No image path provided."
-        
     p = Path(image_path).resolve()
-    
     if not p.is_file():
-        return (f"Error: Wallpaper file not found at: {p}")
-    
-    image_uri = p.as_uri() # Standard URI for commands/settings
+        return f"Error: Wallpaper file not found at: {p}"
+    image_uri = p.as_uri()
 
-    # 2. Platform-Specific Logic
-    if IS_WINDOWS and ctypes:
-        # Windows: Use the native SystemParametersInfoW
-        try:
-            # 20: SPI_SETDESKWALLPAPER
-            # 3: SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
+    try:
+        if IS_WINDOWS and ctypes:
             ctypes.windll.user32.SystemParametersInfoW(20, 0, str(p), 3)
             return "Wallpaper changed successfully (Windows)."
-        except Exception as e:
-            _print_err(f"Windows wallpaper failed: {e}")
-            return f"Windows wallpaper change failed: {e}"
-
-    elif IS_MACOS:
-        # macOS: Use osascript (AppleScript) to interact with Finder/System Events
-        try:
-            script = f"""
-            tell application "System Events"
-                tell application "Finder"
-                    set desktop picture to POSIX file "{p}"
-                end tell
-            end tell
-            """
-            subprocess.run(["osascript", "-e", script], check=True, capture_output=True, timeout=10)
+        elif IS_MACOS:
+            script = f'tell application "System Events" to set desktop picture to POSIX file "{p}"'
+            subprocess.run(["osascript", "-e", script], check=True, timeout=10)
             return "Wallpaper changed successfully (macOS)."
-        except subprocess.CalledProcessError as e:
-             _print_err(f"macOS wallpaper failed: {e.stderr.decode()}")
-             return "macOS wallpaper change failed (Script Error: check image format)."
-        except Exception as e:
-            _print_err(f"macOS wallpaper failed: {e}")
-            return f"macOS wallpaper change failed: {e}"
-
-    elif IS_LINUX:
-        # Linux: Use gsettings (Gnome, Cinnamon, Mate) or feh (other WMs)
-        # Note: GNOME is the most common default environment.
-        try:
-            # Try GSettings (Gnome, Cinnamon, Mate, potentially others)
-            # We use the 'file' schema and the image URI
-            subprocess.run(["gsettings", "set", "org.gnome.desktop.background", "picture-uri", image_uri], 
-                           check=True, capture_output=True, timeout=5)
-            # Newer GNOME uses picture-uri-dark
-            subprocess.run(["gsettings", "set", "org.gnome.desktop.background", "picture-uri-dark", image_uri], 
-                           check=False, capture_output=True, timeout=5)
-            
-            return "Wallpaper changed successfully (Linux - GSettings/GNOME)."
-            
-        except subprocess.CalledProcessError:
-            # Fallback to older commands or other DEs
+        elif IS_LINUX:
             try:
-                # Try XFCE
-                subprocess.run(["xfconf-query", "-c", "xfce4-desktop", "-p", "/backdrop/screen0/monitor0/workspace0/last-image", "-s", str(p)], 
-                               check=True, capture_output=True, timeout=5)
-                return "Wallpaper changed successfully (Linux - XFCE)."
+                subprocess.run(["gsettings", "set", "org.gnome.desktop.background", "picture-uri", image_uri], check=True, timeout=5)
+                subprocess.run(["gsettings", "set", "org.gnome.desktop.background", "picture-uri-dark", image_uri], check=False, timeout=5)
+                return "Wallpaper changed successfully (Linux - GSettings/GNOME)."
             except subprocess.CalledProcessError:
-                # Fallback to using feh (requires feh to be installed)
                 try:
-                    subprocess.run(["feh", "--bg-scale", str(p)], check=True, capture_output=True, timeout=5)
-                    return "Wallpaper changed successfully (Linux - feh)."
+                    subprocess.run(["xfconf-query", "-c", "xfce4-desktop", "-p", "/backdrop/screen0/monitor0/workspace0/last-image", "-s", str(p)], check=True, timeout=5)
+                    return "Wallpaper changed successfully (Linux - XFCE)."
                 except subprocess.CalledProcessError:
-                     return "Linux wallpaper change failed. Requires gsettings, xfconf, or 'feh' to be installed and accessible."
-            except Exception as e:
-                 _print_err(f"Linux wallpaper failed: {e}")
-                 return f"Linux wallpaper change failed: {e}"
+                    try:
+                        subprocess.run(["feh", "--bg-scale", str(p)], check=True, timeout=5)
+                        return "Wallpaper changed successfully (Linux - feh)."
+                    except subprocess.CalledProcessError:
+                        return "Linux wallpaper change failed. Requires gsettings, xfconf, or feh."
+    except Exception as e:
+        _print_err(f"Wallpaper change failed: {e}")
+        return f"Wallpaper change failed: {e}"
 
-    return "Wallpaper change not supported on this operating system."
-
+    return "Wallpaper change not supported on this OS."
 
 # -----------------------------
 # Analyze CSV -> DOCX report
 # -----------------------------
 
 def analyze_and_report(*args, **kwargs):
-    # Accept positional (csv_file, report_file) or keyword args
+    """
+    Analyze a CSV file and generate a Word report using AI.
+
+    Accepts:
+        Positional args: csv_file, report_file
+        Keyword args: csv_file, report_file
+    Returns:
+        str: Status message
+    """
     if Document is None:
-        return ("python-docx not available.")
+        return "python-docx not available."
+
+    # Determine input CSV and output report file
+    csv_file = report_file = None
     if args:
         csv_file = args[0]
         report_file = args[1] if len(args) > 1 else kwargs.get("report_file")
     else:
         csv_file = kwargs.get("csv_file") or kwargs.get("raw_input")
         report_file = kwargs.get("report_file")
+
+    if not csv_file or not Path(csv_file).is_file():
+        return f"CSV file not found: {csv_file}"
+
+    if not report_file:
+        report_file = str(Path("AI_Report.docx").resolve())
+
     try:
+        # Read CSV
         csv_text = Path(csv_file).read_text(encoding="utf-8", errors="ignore")
-        report_content = groq_answer("Analyze the following CSV data and generate a detailed report:", csv_text)
+
+        # Generate AI report
+        report_content = groq_answer(
+            "Analyze the following CSV data and generate a detailed report:",
+            csv_text
+        )
+        if not report_content:
+            return "AI analysis returned no content."
+
+        # Create Word document
         doc = Document()
         doc.add_heading("AI-Generated Report", level=1)
         doc.add_paragraph(report_content)
         doc.save(str(report_file))
-        return (f"Report generated: {report_file}")
+
+        return f"✅ Report generated: {report_file}"
+
     except FileNotFoundError:
         _print_err(f"File not found: {csv_file}")
+        return f"❌ CSV file not found: {csv_file}"
     except Exception as e:
         _print_err(f"Report generation failed: {e}")
+        return f"❌ Report generation failed: {e}"
+
 
 # -----------------------------
 # Email (Django)
@@ -1613,24 +1980,48 @@ def analyze_and_report(*args, **kwargs):
 
 
 def send_email(*args, **kwargs):
-    # Accept positional (message, email) or keywords
+    """
+    Send a single email using Django's send_mail.
+    Accepts:
+        Positional: message, recipient_email
+        Keyword: message, email
+    """
     if args:
         message = args[0]
         email = args[1] if len(args) > 1 else kwargs.get("email")
     else:
         message = kwargs.get("message") or kwargs.get("raw_input")
         email = kwargs.get("email")
+
+    if not message or not email:
+        return "❌ Missing message or recipient email."
+
     try:
-        from django.core.mail import send_mail as dj_send_mail # type: ignore
+        from django.core.mail import send_mail as dj_send_mail  # type: ignore
     except Exception:
-        return ("Django mail not configured/installed.")
+        return "❌ Django mail not configured/installed."
+
     try:
-        dj_send_mail("", message, email, [email], fail_silently=False)
+        dj_send_mail(
+            subject="",
+            message=message,
+            from_email=email,
+            recipient_list=[email],
+            fail_silently=False
+        )
+        return f"✅ Email sent to {email}"
     except Exception as e:
         _print_err(f"send_email failed: {e}")
+        return f"❌ Failed to send email to {email}: {e}"
+
 
 def send_multiple_emails(*args, **kwargs):
-    # Accept positional (message, emails_string, sender)
+    """
+    Send multiple emails to a comma-separated list using Django's send_mail.
+    Accepts:
+        Positional: message, emails_string, sender
+        Keyword: message, emails_string, sender
+    """
     if args:
         message = args[0]
         emails_string = args[1] if len(args) > 1 else kwargs.get("emails_string")
@@ -1640,25 +2031,45 @@ def send_multiple_emails(*args, **kwargs):
         emails_string = kwargs.get("emails_string")
         sender = kwargs.get("sender", "you@example.com")
 
+    if not message or not emails_string:
+        return "❌ Missing message or recipient emails."
+
     try:
-        from django.core.mail import send_mail as dj_send_mail # type: ignore
+        from django.core.mail import send_mail as dj_send_mail  # type: ignore
     except Exception:
-        return ("Django mail not configured/installed.")
+        return "❌ Django mail not configured/installed."
+
     emails = [e.strip() for e in emails_string.split(",") if e.strip()]
     results = []
+
     for email in emails:
         try:
-            dj_send_mail("", message, sender, [email], fail_silently=False)
-            results.append(f"Email sent to {email}")
+            dj_send_mail(
+                subject="",
+                message=message,
+                from_email=sender,
+                recipient_list=[email],
+                fail_silently=False
+            )
+            results.append(f"✅ Email sent to {email}")
         except Exception as e:
             _print_err(f"Failed to send to {email}: {e}")
-            results.append(f"Failed to send to {email}: {e}")
+            results.append(f"❌ Failed to send to {email}: {e}")
+
     return "\n".join(results)
+
 # -----------------------------
 # Search & open files
 # -----------------------------
 
 def list_all_files_and_folders(path: str | Path) -> str:
+    """
+    Recursively lists all files and folders under the given path.
+    """
+    path = Path(path).resolve()
+    if not path.exists():
+        return f"❌ Path does not exist: {path}"
+    
     lines = []
     for root, dirs, files in os.walk(path):
         lines.append(f"\n📁 Folder: {root}")
@@ -1668,8 +2079,13 @@ def list_all_files_and_folders(path: str | Path) -> str:
             lines.append(f"  📄 File: {f}")
     return "\n".join(lines)
 
+
 def open_file(*args, **kwargs):
-    # Accept positional (keyword, roots) or keywords
+    """
+    Opens the most recently modified file that matches the keyword in the specified roots.
+    Positional args: keyword, roots (optional)
+    Keyword args: keyword, roots (list of paths)
+    """
     if args:
         keyword = args[0]
         roots = args[1] if len(args) > 1 else kwargs.get("roots")
@@ -1677,6 +2093,10 @@ def open_file(*args, **kwargs):
         keyword = kwargs.get("keyword") or kwargs.get("raw_input")
         roots = kwargs.get("roots")
 
+    if not keyword:
+        return "❌ No keyword provided."
+
+    # Default search roots
     roots = roots or [
         Path.home() / "Documents",
         Path.home() / "Downloads",
@@ -1685,56 +2105,86 @@ def open_file(*args, **kwargs):
         Path.home() / "Videos",
         Path.home() / "Music",
     ]
-    k = keyword.lower()
+
+    keyword_lower = keyword.lower()
     candidates: List[Path] = []
+
     for root in roots:
+        root = Path(root)
         if not root.exists():
             continue
         for p in root.rglob("*"):
-            if p.is_file() and k in p.name.lower():
+            if p.is_file() and keyword_lower in p.name.lower():
                 candidates.append(p)
+
     if not candidates:
-        return ("No matching file found.")
-    # Choose most recent modified
+        return "❌ No matching file found."
+
+    # Pick the most recently modified file
     best = max(candidates, key=lambda p: p.stat().st_mtime)
+
     try:
         if IS_WINDOWS:
             os.startfile(str(best.resolve()))
+        elif IS_MACOS:
+            subprocess.run(["open", str(best.resolve())], check=False)
         else:
             subprocess.run(["xdg-open", str(best.resolve())], check=False)
-        return (f"Opened: {best}")
+        return f"✅ Opened: {best}"
     except Exception as e:
-        _print_err(f"Open failed: {e}")
+        _print_err(f"Failed to open file: {e}")
+        return f"❌ Failed to open file: {best}"
 
 # -----------------------------
 # Brightness & Net speed
 # -----------------------------
 
 def dim_light(*args, **kwargs):
-    # Accept positional level or keyword 'level'
+    """
+    Sets the screen brightness to a specified level (0-100).
+    Positional args: level
+    Keyword args: level
+    """
     if args:
         level = args[0]
     else:
         level = kwargs.get("level", 45)
+    
     try:
-        set_brightness(int(level))
+        level_int = int(level)
+        if not 0 <= level_int <= 100:
+            return "Brightness level must be between 0 and 100."
+        set_brightness(level_int)
+        return f"Brightness set to {level_int}%."
     except Exception as e:
         _print_err(f"Set brightness failed: {e}")
+        return f"Failed to set brightness: {e}"
+
 
 def internet_speed(duration: int = 3) -> str:
+    """
+    Measures the approximate internet download speed over a given duration (seconds).
+    Returns Mbps.
+    """
     try:
         pernic = psutil.net_io_counters(pernic=True)
-        interface = next((n for n, s in pernic.items() if not n.startswith("lo") and s.bytes_recv > 0), None)
+        # Pick the first non-loopback interface with traffic
+        interface = next((name for name, stats in pernic.items() 
+                          if not name.startswith("lo") and stats.bytes_recv > 0), None)
         if not interface:
             return "No active network interface found."
-        bytes_recv = pernic[interface].bytes_recv
+        
+        start_bytes = pernic[interface].bytes_recv
         time.sleep(duration)
-        new_bytes_recv = psutil.net_io_counters(pernic=True)[interface].bytes_recv
-        recv = new_bytes_recv - bytes_recv
-        mbps = recv / (duration * 1024 * 1024)
+        end_bytes = psutil.net_io_counters(pernic=True)[interface].bytes_recv
+        received = end_bytes - start_bytes
+        mbps = received * 8 / (duration * 1024 * 1024)  # Convert bytes to megabits
         return f"Internet Speed ({interface}): {mbps:.2f} Mbps"
+    
     except Exception as e:
-        return f"Speed check failed: {e}"
+        _print_err(f"Speed check failed: {e}")
+        return f"Internet speed check failed: {e}"
+
 
 # -----------------------------
 # System restore point (Win)
@@ -1742,64 +2192,50 @@ def internet_speed(duration: int = 3) -> str:
 
 def create_system_restore_point(**kwargs) -> str:
     """
-    Creates a system snapshot or restore point using the native mechanism
-    for Windows (System Restore), macOS (Time Machine Snapshot), or Linux (Timeshift/LVM).
+    Creates a system snapshot or restore point using native mechanisms:
+    - Windows: System Restore
+    - macOS: Time Machine Snapshot
+    - Linux: Timeshift Snapshot
     """
-    # Create a unique name using the current date/time if not provided
     default_name = f"AutoPoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     name = kwargs.get("name", default_name)
-    
-    # Clean up the name for command line use (remove quotes, sanitize)
-    clean_name = name.replace('"', '').replace("'", "")[:64] # Limit length
+    clean_name = "".join(c for c in name if c.isalnum() or c in "_-")[:64]
 
     if IS_WINDOWS:
-        # Windows: Use WMIC to create a System Restore point
         try:
             command = f'wmic.exe /Namespace:\\\\root\\default Path SystemRestore Call CreateRestorePoint "{clean_name}", 100, 7'
-            
-            # Using subprocess.run for better error handling and security
-            result = subprocess.run(command, check=False, shell=True, capture_output=True, text=True, timeout=15)
-            
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15)
             if "ReturnValue = 0" in result.stdout:
                 return f"System Restore Point created successfully (Windows): {clean_name}"
-            else:
-                _print_err(f"WMIC output: {result.stdout.strip()}")
-                return "Failed to create Windows System Restore Point. (Ensure System Protection is ON)."
+            _print_err(f"WMIC output: {result.stdout.strip()}")
+            return "Failed to create Windows System Restore Point. Ensure System Protection is ON."
         except Exception as e:
             _print_err(f"Windows restore point failed: {e}")
             return f"Windows restore point command failed: {e}"
 
     elif IS_MACOS:
-        # macOS: Create a local Time Machine Snapshot
         try:
-            command = ["tmutil", "snapshot"]
-            subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
+            subprocess.run(["tmutil", "snapshot"], check=True, capture_output=True, text=True, timeout=30)
             return f"Local Time Machine Snapshot created successfully (macOS)."
         except subprocess.CalledProcessError as e:
             _print_err(f"tmutil failed: {e.stderr.strip()}")
-            return "Failed to create macOS Time Machine Snapshot. (Ensure Time Machine is configured)."
+            return "Failed to create macOS Time Machine Snapshot. Ensure Time Machine is configured."
         except Exception as e:
             _print_err(f"macOS snapshot failed: {e}")
             return f"macOS snapshot command failed: {e}"
 
     elif IS_LINUX:
-        # Linux: Use Timeshift (if installed) or a LVM/BTRFS-specific command.
-        # Timeshift is the closest equivalent to System Restore for desktop Linux.
         try:
-            # Command to create a Timeshift snapshot
-            command = ["sudo", "timeshift", "--create", "--comments", clean_name]
-            
-            # Timeshift requires sudo and takes time, so a high timeout is necessary.
-            result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
-            
+            result = subprocess.run(
+                ["sudo", "timeshift", "--create", "--comments", clean_name],
+                check=False, capture_output=True, text=True, timeout=60
+            )
             if result.returncode == 0 and "Snapshot created successfully" in result.stdout:
                 return f"Timeshift Snapshot created successfully (Linux): {clean_name}"
-            elif result.returncode != 0 and "command not found" in result.stderr:
-                 return "Linux snapshot failed: Timeshift is not installed or not in PATH."
-            else:
-                _print_err(f"Timeshift output: {result.stderr.strip()}")
-                return "Failed to create Linux Timeshift Snapshot. (Requires sudo and Timeshift installed)."
-
+            elif result.returncode != 0 and "command not found" in result.stderr.lower():
+                return "Linux snapshot failed: Timeshift is not installed or not in PATH."
+            _print_err(f"Timeshift output: {result.stderr.strip()}")
+            return "Failed to create Linux Timeshift Snapshot. Requires sudo and Timeshift installed."
         except Exception as e:
             _print_err(f"Linux snapshot failed: {e}")
             return f"Linux snapshot command failed: {e}"
@@ -1811,90 +2247,132 @@ def create_system_restore_point(**kwargs) -> str:
 # -----------------------------
 
 def get_file_hash(**kwargs) -> Optional[str]:
+    """Compute SHA-256 hash of a file in chunks to handle large files."""
     path = kwargs.get("path") or kwargs.get("raw_input")
-    chunk_size = int(kwargs.get("chunk_size", 1 << 20))
-    hasher = hashlib.sha256()
+    chunk_size = int(kwargs.get("chunk_size", 1 << 20))  # default 1 MB
     p = Path(path)
+    if not p.is_file():
+        _print_err(f"Path is not a file: {p}")
+        return None
+
+    hasher = hashlib.sha256()
     try:
         with p.open("rb") as f:
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
+            for chunk in iter(lambda: f.read(chunk_size), b""):
                 hasher.update(chunk)
         return hasher.hexdigest()
     except Exception as e:
         _print_err(f"Could not read {p}: {e}")
         return None
 
+
 def find_and_delete_duplicates(**kwargs):
+    """Find duplicate files by SHA-256 hash and delete duplicates."""
     folder = Path(kwargs.get("folder") or kwargs.get("raw_input"))
+    if not folder.is_dir():
+        return f"Error: {folder} is not a valid directory."
+
     hashes: Dict[str, Path] = {}
-    deleted = 0
+    deleted_files: List[str] = []
+
     for p in folder.rglob("*"):
         if not p.is_file():
             continue
-        h = get_file_hash(path=p)
-        if not h:
+        file_hash = get_file_hash(path=p)
+        if not file_hash:
             continue
-        if h in hashes:
+        if file_hash in hashes:
             try:
                 p.unlink(missing_ok=True)
-                deleted += 1
+                deleted_files.append(str(p))
             except Exception as e:
                 _print_err(f"Failed to delete {p}: {e}")
         else:
-            hashes[h] = p
-    return (f"\n✅ Done. {deleted} duplicates deleted.")
+            hashes[file_hash] = p
+
+    return f"✅ Done. {len(deleted_files)} duplicates deleted.\nDeleted files:\n" + "\n".join(deleted_files) if deleted_files else "✅ No duplicates found."
+
 
 # -----------------------------
 # Battery status
 # -----------------------------
 
+def _switch_to_power_saver(verbose: bool = True) -> str:
+    """
+    Activates the platform's power-saver / low-energy profile.
+    Works on Windows, macOS, and Linux (requires sudo on Linux).
+    """
+    try:
+        if IS_WINDOWS:
+            # GUID for Power Saver plan
+            cmd = "powercfg /setactive a1841308-3541-4fab-bc81-f71556f20b4a"
+            subprocess.run(cmd, check=False, shell=True, capture_output=True, timeout=5)
+            return "✅ Windows power plan set to Power Saver."
 
-def _switch_to_power_saver():
-    """Activates the platform's power-saver or low-energy profile."""
-    if IS_WINDOWS:
-        # GUID for default Power Saver: a1841308-3541-4fab-bc81-f71556f20b4a
-        subprocess.run("powercfg /setactive a1841308-3541-4fab-bc81-f71556f20b4a", 
-                       check=False, shell=True, capture_output=True, timeout=5)
-        return "Windows power plan set to Power Saver."
-    elif IS_MACOS:
-        # Disable high power state (if set) and enable 'autopoweroff'
-        # pmset -a command is complex, simpler is to tell the user/revert custom setting
-        subprocess.run(["pmset", "-a", "lowpowermode", "1"], check=False, timeout=5, stderr=subprocess.DEVNULL)
-        return "macOS Low Power Mode attempted (requires macOS 10.15+)."
-    elif IS_LINUX:
-        # Set CPU Governor to 'powersave' (requires sudo)
-        try:
+        elif IS_MACOS:
+            # Enable Low Power Mode (macOS 10.15+)
+            subprocess.run(["pmset", "-a", "lowpowermode", "1"],
+                           check=False, capture_output=True, timeout=5)
+            return "✅ macOS Low Power Mode attempted."
+
+        elif IS_LINUX:
+            # Attempt to set CPU governor to 'powersave'
             cpu_paths = list(Path("/sys/devices/system/cpu/").glob("cpu*/cpufreq/scaling_governor"))
+            if not cpu_paths:
+                return "⚠️ No CPU governor paths found. Power save not applied."
+            
+            failed = 0
             for p in cpu_paths:
-                subprocess.run(f"echo powersave | sudo tee {p}", 
-                               check=False, shell=True, capture_output=True, timeout=5)
-            return "Linux CPU Governor set to 'powersave'."
-        except Exception:
-            # Fallback if no paths or permissions fail
-            return "Linux power saving activation failed (requires sudo/governor support)."
-    return "Power saving actions skipped."
+                try:
+                    subprocess.run(f"echo powersave | sudo tee {p}",
+                                   check=True, shell=True, capture_output=True, timeout=5)
+                except Exception:
+                    failed += 1
+            if failed == 0:
+                return "✅ Linux CPU Governor set to 'powersave'."
+            else:
+                return f"⚠️ Linux attempted 'powersave' but failed for {failed} CPUs (requires sudo)."
+
+        else:
+            return "⚠️ Power saving actions skipped: unsupported OS."
+    
+    except Exception as e:
+        if verbose:
+            _print_err(f"Power saving activation failed: {e}")
+        return f"❌ Power saving activation failed: {e}"
+
 
 def _show_alert(title: str, message: str):
-    """Shows a native, blocking alert box."""
-    if IS_WINDOWS and ctypes:
-        # Windows: native MessageBoxW
-        ctypes.windll.user32.MessageBoxW(0, message, title, 1)
-    elif IS_MACOS:
-        # macOS: osascript (AppleScript for display dialog)
-        script = f'display dialog "{message}" with title "{title}" buttons {{"OK"}} default button "OK"'
-        subprocess.run(["osascript", "-e", script], check=False, timeout=5, stderr=subprocess.DEVNULL)
-    elif IS_LINUX:
-        # Linux: zenity, notify-send, or similar (zenity is common for blocking dialogs)
-        if shutil.which("zenity"):
-            subprocess.run(["zenity", "--warning", "--title", title, "--text", message], check=False, timeout=5, stderr=subprocess.DEVNULL)
+    """Shows a native, blocking alert box across platforms."""
+    try:
+        if IS_WINDOWS and ctypes:
+            # Windows: native MessageBoxW
+            ctypes.windll.user32.MessageBoxW(0, message, title, 1)
+
+        elif IS_MACOS:
+            # macOS: AppleScript (escape quotes)
+            safe_message = message.replace('"', '\\"')
+            safe_title = title.replace('"', '\\"')
+            script = f'display dialog "{safe_message}" with title "{safe_title}" buttons {{"OK"}} default button "OK"'
+            subprocess.run(["osascript", "-e", script],
+                           check=False, timeout=5, stderr=subprocess.DEVNULL)
+
+        elif IS_LINUX:
+            # Linux: use zenity if available
+            if shutil.which("zenity"):
+                subprocess.run(["zenity", "--warning", "--title", title, "--text", message],
+                               check=False, timeout=5, stderr=subprocess.DEVNULL)
+            else:
+                # fallback to terminal print
+                print(f"\n[ALERT] {title}: {message}\n")
+
         else:
-            # Simple terminal print if no GUI tool is found
+            # Fallback for unknown OS
             print(f"\n[ALERT] {title}: {message}\n")
-    else:
-        print(f"\n[ALERT] {title}: {message}\n")
+    except Exception as e:
+        # In case even native alert fails, fallback to print
+        print(f"\n[ALERT] {title}: {message} (Alert failed: {e})\n")
+
 
 # --- Smart Battery Function ---
 
@@ -1906,59 +2384,87 @@ def smart_battery(**kwargs) -> str:
     """
     if psutil is None:
         return "Error: The 'psutil' library is not installed."
-        
-    batt = psutil.sensors_battery()
-    
-    if batt is None:
-        return "Battery info not available (Desktop or unsupported hardware)."
-        
-    plugged = batt.power_plugged
-    percent = int(batt.percent)
-    
-    if plugged:
-        return(f"Battery is plugged in at {percent}%")
-        
-    # Messages and actions by range
-    msg = ""
-    action_taken = ""
 
-    if percent > 75:
-        msg = f"Battery is {percent}% — Perfect."
-    elif 50 < percent <= 75:
-        msg = f"Battery is {percent}% — Good charge."
-    elif 25 < percent <= 50:
-        msg = f"Battery is {percent}% — Consider charging soon."
-    elif 10 < percent <= 25:
-        # Low Battery Alert + Power Saver Switch
-        alert_msg = "Battery low! Switching to saver mode."
-        _show_alert("Battery Alert (25%)", alert_msg)
-        action_taken = _switch_to_power_saver()
-        msg = f"Battery is {percent}% — Charge now! {action_taken}"
-    elif 5 < percent <= 10:
-        # Critical Alert + Power Saver Switch
-        alert_msg = "Battery low! Switching to saver mode."
-        _show_alert("Battery Alert (10%)", alert_msg)
-        action_taken = _switch_to_power_saver()
-        msg = f"Battery is {percent}% — Charge immediately! {action_taken}"
-    else: # 0-5%
-        # Critical Alert + Power Saver Switch
-        alert_msg = "Battery low! Switching to saver mode."
-        _show_alert("Battery Critical! (5%)", alert_msg)
-        action_taken = _switch_to_power_saver()
-        msg = f"Battery is {percent}% — Critical! Plug in now. {action_taken}"
-        
-    return(msg)
+    try:
+        batt = psutil.sensors_battery()
+        if batt is None:
+            return "Battery info not available (Desktop or unsupported hardware)."
+
+        plugged = batt.power_plugged
+        percent = int(batt.percent)
+
+        if plugged:
+            return f"Battery is plugged in at {percent}%"
+
+        # Messages and actions by range
+        msg = ""
+        action_taken = ""
+
+        if percent > 75:
+            msg = f"Battery is {percent}% — Perfect."
+        elif 50 < percent <= 75:
+            msg = f"Battery is {percent}% — Good charge."
+        elif 25 < percent <= 50:
+            msg = f"Battery is {percent}% — Consider charging soon."
+        elif 10 < percent <= 25:
+            alert_msg = "Battery low! Switching to saver mode."
+            _show_alert("Battery Alert (25%)", alert_msg)
+            action_taken = _switch_to_power_saver()
+            msg = f"Battery is {percent}% — Charge now! {action_taken}"
+        elif 5 < percent <= 10:
+            alert_msg = "Battery very low! Switching to saver mode."
+            _show_alert("Battery Alert (10%)", alert_msg)
+            action_taken = _switch_to_power_saver()
+            msg = f"Battery is {percent}% — Charge immediately! {action_taken}"
+        else:  # 0-5%
+            alert_msg = "Battery critically low! Switching to saver mode."
+            _show_alert("Battery Critical! (5%)", alert_msg)
+            action_taken = _switch_to_power_saver()
+            msg = f"Battery is {percent}% — Critical! Plug in now. {action_taken}"
+
+        return msg
+
+    except Exception as e:
+        _print_err(f"Battery check failed: {e}")
+        return "Failed to retrieve battery status."
+
 
 # -----------------------------
 # YouTube search
 # -----------------------------
 
 def yt_search(**kwargs):
+    """
+    Opens YouTube search results in the default web browser.
+
+    Keyword Args:
+        user (str): Raw user input containing the search query.
+        raw_input (str): Alternative to 'user' for backward compatibility.
+
+    Returns:
+        str: Confirmation message.
+    """
     import webbrowser
-    user = kwargs.get("user") or kwargs.get("raw_input") or ""
-    q = re.sub(r"(?i)youtube\s*search", "", user).strip()
-    webbrowser.open(f"https://www.youtube.com/results?search_query={requests.utils.quote(q)}")
-    return "Opened YouTube search results."
+
+    # Extract user input
+    user_input = kwargs.get("user") or kwargs.get("raw_input") or ""
+    if not user_input.strip():
+        return "No search query provided."
+
+    # Remove "youtube search" from input, case-insensitive
+    query = re.sub(r"(?i)youtube\s*search", "", user_input).strip()
+    if not query:
+        return "No valid search query after cleaning input."
+
+    # Open YouTube search in default browser
+    try:
+        url = f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}"
+        webbrowser.open(url)
+        return f"Opened YouTube search results for: '{query}'"
+    except Exception as e:
+        _print_err(f"Failed to open YouTube: {e}")
+        return "Failed to open YouTube search."
+
 
 # -----------------------------
 # Smart app/web open/close
@@ -2100,13 +2606,29 @@ def closeappweb(**kwargs) -> str:
 
 def summarize_excel_with_groq(**kwargs):
     file_path = kwargs.get("file_path") or kwargs.get("raw_input")
+    p = Path(file_path)
+    if not p.is_file():
+        return f"Error: Excel file not found at {file_path}"
+
     try:
-        df = pd.read_excel(file_path)
-        text_data = df.to_string(index=False)
-        summary = groq_answer("Summarize the following table data concisely:", text_data)
-        return (summary)
+        # Read Excel, auto-detect engine
+        df = pd.read_excel(file_path, engine=None)
+        if df.empty:
+            return "Excel file is empty."
+
+        # Convert to string (limit rows for huge files)
+        text_data = df.head(100).to_string(index=False)  # Limit to first 100 rows
+        prompt = (
+            "Summarize the following Excel table concisely, highlighting key trends, "
+            "important values, and insights. Include headers for clarity:\n\n"
+            f"{text_data}"
+        )
+        summary = groq_answer(prompt)
+        return summary or "Groq did not return a summary."
     except Exception as e:
         _print_err(f"Excel summarize failed: {e}")
+        return f"Failed to summarize Excel: {e}"
+
 
 # -----------------------------
 # Helpers
@@ -2123,53 +2645,83 @@ def textwrap(**kwargs) -> str:
 # -----------------------------
 
 def melody(**kwargs):
-    import melody_generator
-    melody_generator.main()
+    from melody_generator import main as melody_main
+    melody_main()
 
-MACRO_FILE = "macros.json"
+MACRO_FILE = Path("macros.json")
+
+def load_macros() -> dict:
+    if MACRO_FILE.exists():
+        try:
+            return json.loads(MACRO_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            _print_err(f"Failed to load macros: {e}")
+    return {}
+
+def save_macros(macros: dict):
+    try:
+        MACRO_FILE.write_text(json.dumps(macros, indent=2), encoding="utf-8")
+    except Exception as e:
+        _print_err(f"Failed to save macros: {e}")
 
 def record_macro(**kwargs):
     name = kwargs.get("name", "default")
     duration = int(kwargs.get("duration", 30))
     print(f"🎥 Recording macro '{name}' for {duration}s...")
+    
     start = time.time()
     actions = []
-    while time.time() - start < duration:
-        x, y = pyautogui.position()
-        actions.append({"time": time.time()-start, "pos": (x,y)})
-        time.sleep(0.5)
-    with open(MACRO_FILE, "w") as f:
-        json.dump(actions, f)
-    return f"✅ Macro '{name}' saved."
-
+    try:
+        while time.time() - start < duration:
+            x, y = pyautogui.position()
+            actions.append({"time": time.time() - start, "pos": (x, y)})
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("Recording interrupted manually.")
+    
+    macros = load_macros()
+    macros[name] = actions
+    save_macros(macros)
+    return f"✅ Macro '{name}' saved with {len(actions)} actions."
 
 def play_macro(**kwargs):
     name = kwargs.get("name", "default")
-    try:
-        with open(MACRO_FILE) as f:
-            actions = json.load(f)
-        for act in actions:
-            pyautogui.moveTo(*act["pos"])
-            time.sleep(0.5)
-        return f"▶️ Macro '{name}' executed."
-    except Exception:
-        return "❌ Macro not found."
+    macros = load_macros()
+    
+    if name not in macros:
+        return f"❌ Macro '{name}' not found."
+    
+    actions = macros[name]
+    start = time.time()
+    for act in actions:
+        pyautogui.moveTo(*act["pos"])
+        # Maintain relative timing
+        elapsed = time.time() - start
+        sleep_time = act["time"] - elapsed
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+    
+    return f"▶️ Macro '{name}' executed ({len(actions)} actions)."
+
     
 
 # -------------------------
 # Web Interaction Functions
 # -------------------------
 
-def fetch_page(url: str, **kwargs):
-    try:
-        resp = SESSION.get(url, timeout=10)
-        resp.raise_for_status()
-        return resp.text
-    except Exception as e:
-        _print_err(f"fetch_page failed for {url}: {e}")
-        return ""
+def fetch_page(url: str, retries: int = 3, delay: int = 2, **kwargs) -> str:
+    """Fetch HTML content safely with retries and random User-Agent."""
+    for _ in range(retries):
+        try:
+            headers = kwargs.pop("headers", {"User-Agent": random.choice(HEADERS_LIST)})
+            resp = SESSION.get(url, timeout=10, headers=headers, **kwargs)
+            resp.raise_for_status()
+            return resp.text
+        except requests.RequestException:
+            time.sleep(delay)
+    return ""
 
-def get_page_title(url: str, **kwargs):
+def get_page_title(url: str) -> str:
     html = fetch_page(url)
     if not html:
         return ""
@@ -2177,7 +2729,7 @@ def get_page_title(url: str, **kwargs):
     title_tag = soup.find("title")
     return title_tag.get_text(strip=True) if title_tag else ""
 
-def get_meta_description(url: str, **kwargs):
+def get_meta_description(url: str) -> str:
     html = fetch_page(url)
     if not html:
         return ""
@@ -2185,99 +2737,93 @@ def get_meta_description(url: str, **kwargs):
     desc_tag = soup.find("meta", attrs={"name": "description"})
     return desc_tag["content"].strip() if desc_tag and "content" in desc_tag.attrs else ""
 
-def search_google(query: str, num_results: int = 5, **kwargs) -> List[str]:
-    """
-    Performs a Google search using web scraping. WARNING: This method is highly 
-    unreliable and often breaks due to Google's anti-scraping measures and frequent 
-    HTML changes. Use a dedicated API for production environments.
-    """
-    # Use requests.utils.quote or urllib.parse.quote for standard URL encoding
+def search_google(query: str, num_results: int = 5) -> List[str]:
+    """Scrapes Google search results (fragile; use API for production)."""
     try:
-        query_encoded = requests.utils.quote(query)
-    except AttributeError:
-        # Fallback if requests.utils is missing quote (uncommon)
-        from urllib.parse import quote
         query_encoded = quote(query)
-
-    url = f"https://www.google.com/search?q={query_encoded}&num={num_results}"
-    
-    # Use a realistic User-Agent to slightly reduce bot detection risk
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36"}
-    
-    try:
-        # Ensure SESSION is available or use requests directly
-        if 'SESSION' in globals():
-            resp = SESSION.get(url, headers=headers, timeout=10)
-        else:
-            resp = requests.get(url, headers=headers, timeout=10)
-            
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        url = f"https://www.google.com/search?q={query_encoded}&num={num_results}"
+        html = fetch_page(url)
+        if not html:
+            return []
+        soup = BeautifulSoup(html, "html.parser")
         results = []
-        
-        # New selector based on more recent SERP structure (still vulnerable!)
-        # Looks for the main link container for organic results
+
+        # Newer SERP selectors
         for g in soup.find_all("div", class_="yuRUbf"):
             link_tag = g.find("a")
             if link_tag and link_tag.get("href"):
                 results.append(link_tag["href"])
-        
-        # If no results found, try the older selector as a fallback (tF2Cxc)
+
+        # Fallback to older SERP selectors
         if not results:
-             for g in soup.find_all("div", class_="tF2Cxc"):
+            for g in soup.find_all("div", class_="tF2Cxc"):
                 link_tag = g.find("a")
                 if link_tag and link_tag.get("href"):
                     results.append(link_tag["href"])
 
         return results[:num_results]
-        
-    except requests.exceptions.HTTPError as e:
-        # Often a 429 (Too Many Requests) or 403 (Forbidden) is returned
-        _print_err(f"search_google failed (HTTP {e.response.status_code}): {e}")
-        return []
     except Exception as e:
-        _print_err(f"search_google failed: {e}")
+        print(f"search_google failed: {e}")
         return []
 
-def extract_links(url: str, **kwargs):
+def extract_links(url: str) -> List[str]:
     html = fetch_page(url)
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
-    return [a.get("href") for a in soup.find_all("a", href=True)]
+    return [urljoin(url, a.get("href")) for a in soup.find_all("a", href=True)]
 
-def get_text_content(url: str, selector: str = None, **kwargs):
+def get_text_content(url: str, selector: str = None) -> str:
     html = fetch_page(url)
     if not html:
         return ""
     soup = BeautifulSoup(html, "html.parser")
-    if selector:
-        el = soup.select_one(selector)
-        return el.get_text(strip=True) if el else ""
+    selectors = [selector, "article", "main", "body"] if selector else ["article", "main", "body"]
+    for sel in selectors:
+        if sel:
+            el = soup.select_one(sel)
+            if el:
+                return el.get_text(separator="\n", strip=True)
     return soup.get_text(separator="\n", strip=True)
 
 def summarize_pdf(file_path: str, **kwargs):
+    """
+    Summarizes the entire PDF content using Groq.
+    Combines text extraction from all pages and generates a concise summary.
+    """
     try:
         from PyPDF2 import PdfReader
         reader = PdfReader(file_path)
         text = "".join(page.extract_text() or "" for page in reader.pages)
-        return groq_answer("Summarize the following PDF content concisely:", text)
+        if not text.strip():
+            return "PDF has no extractable text."
+        summary_prompt = "Summarize the following PDF content concisely:"
+        summary = groq_answer(summary_prompt, text)
+        return summary
+    except FileNotFoundError:
+        _print_err(f"File not found: {file_path}")
+        return "PDF file not found."
     except Exception as e:
         _print_err(f"summarize_pdf failed: {e}")
-        return ""
+        return "PDF summarization failed."
 
 def analyze_data(*, file_path=None, **kwargs):
     """
     Auto-analyze files: CSV, Excel, PDFs.
     - file_type can be provided in kwargs, otherwise inferred from extension
+    - Returns a structured dictionary with summaries and anomalies (if applicable)
     """
     if not file_path:
-        return "No file provided"
+        return {"error": "No file provided"}
+
+    file_path = Path(file_path)
+    if not file_path.exists():
+        return {"error": f"File not found: {file_path}"}
 
     # Determine file type from kwargs or file extension
     file_type = kwargs.get("file_type")
     if not file_type:
-        ext = Path(file_path).suffix.lower()
+        ext = file_path.suffix.lower()
         if ext in [".csv"]:
             file_type = "csv"
         elif ext in [".xlsx", ".xls"]:
@@ -2285,174 +2831,318 @@ def analyze_data(*, file_path=None, **kwargs):
         elif ext in [".pdf"]:
             file_type = "pdf"
         else:
-            return "Unsupported file type"
+            return {"error": "Unsupported file type"}
 
     # CSV / Excel handling
     if file_type in ("csv", "excel"):
         import pandas as pd
-        df = pd.read_csv(file_path) if file_type=="csv" else pd.read_excel(file_path)
-        summary = df.describe().to_dict()
-        anomalies = df[df.select_dtypes(include="number").apply(lambda x: (x-x.mean()).abs() > 3*x.std()).any(axis=1)]
-        return {"summary": summary, "anomalies": anomalies.to_dict(orient="records")}
+        try:
+            df = pd.read_csv(file_path) if file_type == "csv" else pd.read_excel(file_path)
+            numeric_df = df.select_dtypes(include="number")
+            summary = numeric_df.describe().to_dict() if not numeric_df.empty else {}
+            anomalies = numeric_df[
+                numeric_df.apply(lambda x: (x - x.mean()).abs() > 3 * x.std(), axis=0).any(axis=1)
+            ]
+            return {"summary": summary, "anomalies": anomalies.to_dict(orient="records")}
+        except Exception as e:
+            _print_err(f"CSV/Excel analysis failed: {e}")
+            return {"error": "Failed to analyze CSV/Excel file"}
 
     # PDF handling
     if file_type == "pdf":
-        text = read_pdf(file_path)  # assume your existing read_pdf function
-        summary = groq_answer("Summarize the following PDF:", text)
-        return {"summary": summary}
+        try:
+            text = read_pdf(file_path)  # assumes your existing read_pdf function
+            if not text.strip():
+                return {"summary": "PDF has no extractable text"}
+            summary = groq_answer("Summarize the following PDF:", text)
+            return {"summary": summary}
+        except Exception as e:
+            _print_err(f"PDF analysis failed: {e}")
+            return {"error": "Failed to analyze PDF"}
 
-    return "File type not supported"
-
-
+    return {"error": "File type not supported"}
 
 def plot_data(file_path: str, x_col: str, y_col: str, output: str = "chart.png", **kwargs):
+    """
+    Plots x_col vs y_col from a CSV or Excel file and saves as an image.
+    Returns the output file path if successful.
+    """
     try:
-        if file_path.endswith(".csv"):
+        import pandas as pd
+        import matplotlib.pyplot as plt
+
+        # Load file
+        if file_path.lower().endswith(".csv"):
             df = pd.read_csv(file_path)
-        else:
+        elif file_path.lower().endswith((".xls", ".xlsx")):
             df = pd.read_excel(file_path)
-        plt.figure(figsize=(8,5))
-        plt.plot(df[x_col], df[y_col], marker='o')
+        else:
+            return f"Unsupported file type: {file_path}"
+
+        # Check columns
+        if x_col not in df.columns or y_col not in df.columns:
+            return f"Columns not found in data: {x_col}, {y_col}"
+
+        # Plot
+        plt.figure(figsize=(8, 5))
+        plt.plot(df[x_col], df[y_col], marker='o', linestyle='-', color='b')
         plt.title(f"{y_col} vs {x_col}")
         plt.xlabel(x_col)
         plt.ylabel(y_col)
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig(output)
+
+        # Save
+        plt.savefig(output, dpi=300)
         plt.close()
         return output
+
     except Exception as e:
         _print_err(f"plot_data failed: {e}")
         return ""
 
+
 def convert_text_to_pdf(text: str, output: str = "output.pdf", **kwargs):
+    """
+    Converts a given text string to a PDF file.
+    Returns the path to the generated PDF if successful.
+    """
     try:
+        from fpdf import FPDF
+
         pdf = FPDF()
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
         pdf.set_font("Arial", size=12)
+
         for line in text.split("\n"):
             pdf.multi_cell(0, 8, line)
+
         pdf.output(output)
         return output
+
     except Exception as e:
         _print_err(f"convert_text_to_pdf failed: {e}")
         return ""
 
-def summarize_text(text: str, **kwargs):
-    return groq_answer("Summarize the following text concisely:", text)
-
-def sentiment_analysis(text: str, **kwargs):
-    instructions = "Analyze sentiment of the text and return positive, negative, or neutral:"
-    return groq_answer(instructions, text)
-
-def nlp_qna(text: str, question: str, **kwargs):
-    instructions = f"Answer the question based on the following context:\n{text}\nQuestion: {question}"
-    return groq_answer(instructions)
-
-def schedule_task(task_name: str, delay: int = 60, **kwargs):
-    time.sleep(delay)
-    skill.execute(task_name, **kwargs)
-    return f"Executed scheduled task {task_name} after {delay} sec"
-
-def generate_chart_from_data(data: List[Dict], **kwargs):
-    df = pd.DataFrame(data)
-    numeric_cols = df.select_dtypes(include='number').columns
-    for col in numeric_cols:
-        plt.figure()
-        df[col].plot(kind="bar", title=col)
-        plt.savefig(f"{col}_chart.png")
-    return f"Generated charts for columns: {list(numeric_cols)}"
-
-def analyze_image(**kwargs):
+def summarize_text(text: str, **kwargs) -> str:
     """
-    Analyze an image for objects, text, charts using Groq.
-    kwargs:
-        path: str - path to image file
+    Summarizes a given text concisely using the Groq AI model.
     """
-    path = kwargs.get("path")
-    if not path or not os.path.exists(path):
-        return "Image path invalid"
-    instructions = "Analyze the content of the image and summarize important information."
-    return groq_answer(instructions, f"Image at path: {path}")
-
-
-def generate_report(**kwargs):
-    """
-    Generate PDF/Excel report with plots
-    kwargs:
-        data_path: str - input CSV/Excel
-        output_path: str - output report path
-    """
-    data_path = kwargs.get("data_path")
-    output_path = kwargs.get("output_path", "report.xlsx")
-    if not data_path or not os.path.exists(data_path):
-        return "Data path invalid"
     try:
-        df = pd.read_excel(data_path) if data_path.endswith(".xlsx") else pd.read_csv(data_path)
-        # Generate a simple chart
-        plt.figure(figsize=(8, 6))
-        df.select_dtypes(include="number").plot(kind="line", ax=plt.gca())
+        return groq_answer("Summarize the following text concisely:", text)
+    except Exception as e:
+        _print_err(f"summarize_text failed: {e}")
+        return ""
+
+
+def sentiment_analysis(text: str, **kwargs) -> str:
+    """
+    Performs sentiment analysis on the text.
+    Returns 'positive', 'negative', or 'neutral'.
+    """
+    try:
+        instructions = "Analyze sentiment of the text and return positive, negative, or neutral:"
+        return groq_answer(instructions, text)
+    except Exception as e:
+        _print_err(f"sentiment_analysis failed: {e}")
+        return ""
+
+
+def nlp_qna(text: str, question: str, **kwargs) -> str:
+    """
+    Answers a question based on the provided text context using Groq AI.
+    """
+    try:
+        instructions = f"Answer the question based on the following context:\n{text}\nQuestion: {question}"
+        return groq_answer(instructions)
+    except Exception as e:
+        _print_err(f"nlp_qna failed: {e}")
+        return ""
+
+
+def generate_chart_from_data(data: List[Dict], **kwargs) -> str:
+    """
+    Generates bar charts for all numeric columns in a list-of-dict dataset.
+    Saves each chart as '<column_name>_chart.png'.
+    """
+    try:
+        df = pd.DataFrame(data)
+        numeric_cols = df.select_dtypes(include='number').columns
+        if not numeric_cols.any():
+            return "No numeric columns found to generate charts."
+
+        generated_files = []
+        for col in numeric_cols:
+            plt.figure(figsize=(8,5))
+            df[col].plot(kind="bar", title=col)
+            filename = f"{col}_chart.png"
+            plt.tight_layout()
+            plt.savefig(filename)
+            plt.close()
+            generated_files.append(filename)
+
+        return f"Generated charts: {', '.join(generated_files)}"
+    except Exception as e:
+        _print_err(f"generate_chart_from_data failed: {e}")
+        return "Failed to generate charts."
+
+
+def analyze_image(**kwargs) -> str:
+    """
+    Analyzes an image for objects, text, or charts using Groq.
+    
+    Parameters:
+        path: str - Path to the image file
+    """
+    try:
+        path = kwargs.get("path")
+        if not path or not os.path.isfile(path):
+            return "Error: Image path invalid or file does not exist."
+        
+        instructions = (
+            "Analyze the content of the image and summarize important information, "
+            "including detected objects, text, charts, or any visual insights."
+        )
+        return groq_answer(instructions, f"Image at path: {path}")
+    except Exception as e:
+        _print_err(f"analyze_image failed: {e}")
+        return "Image analysis failed."
+
+
+
+def generate_report(**kwargs) -> dict | str:
+    """
+    Generates a report from a CSV or Excel file with plots and a summary.
+    
+    kwargs:
+        data_path: str - path to input CSV/Excel
+        output_path: str - path to save chart/summary (default: 'report.xlsx')
+    Returns:
+        dict with keys 'chart' and 'summary', or error message string
+    """
+    try:
+        data_path = kwargs.get("data_path")
+        output_path = kwargs.get("output_path", "report.xlsx")
+
+        if not data_path or not os.path.isfile(data_path):
+            return "Error: Data path invalid or file does not exist."
+
+        # Load data
+        df = pd.read_excel(data_path) if data_path.lower().endswith((".xlsx", ".xls")) else pd.read_csv(data_path)
+
+        # Generate line chart for numeric columns
+        numeric_cols = df.select_dtypes(include="number").columns
+        if not numeric_cols.any():
+            return "No numeric columns found to generate chart."
+
+        plt.figure(figsize=(10,6))
+        df[numeric_cols].plot(ax=plt.gca())
         plt.title("Auto-generated Chart")
+        plt.xlabel("Index")
+        plt.ylabel("Values")
+        plt.grid(True)
         chart_path = Path(output_path).with_suffix(".png")
+        plt.tight_layout()
         plt.savefig(chart_path)
         plt.close()
-        # Optionally summarize with Groq
-        summary = groq_answer("Summarize dataset trends and anomalies.", df.head(50).to_string())
+
+        # Summarize dataset with Groq
+        preview_text = df.head(50).to_string()
+        summary = groq_answer("Summarize dataset trends, patterns, and anomalies.", preview_text)
+
         return {"chart": str(chart_path), "summary": summary}
+
     except Exception as e:
+        _print_err(f"generate_report failed: {e}")
         return f"Failed to generate report: {e}"
+
     
 scheduler = sched.scheduler(time.time, time.sleep)
 
 class FolderWatcher(FileSystemEventHandler):
     def __init__(self, callback):
         self.callback = callback
+
     def on_created(self, event):
         if not event.is_directory:
-            self.callback(event.src_path)
+            try:
+                self.callback(event.src_path)
+            except Exception as e:
+                _print_err(f"FolderWatcher callback error: {e}")
 
-def watch_folder(**kwargs):
+def watch_folder(**kwargs) -> str:
     """
-    Watch folder for new files
+    Watch a folder for new files and trigger a callback.
+    
     kwargs:
-        folder: str
-        callback: callable
+        folder: str - folder path to watch
+        callback: callable - function to call when a new file is created
+    Returns:
+        str status message
     """
     folder = kwargs.get("folder")
     callback = kwargs.get("callback")
-    if not folder or not os.path.exists(folder):
-        return "Folder invalid"
+    
+    if not folder or not os.path.isdir(folder):
+        return "Error: Folder path invalid or does not exist."
+    if not callable(callback):
+        return "Error: callback must be a callable function."
+
     observer = Observer()
     observer.schedule(FolderWatcher(callback), folder, recursive=False)
     observer.start()
+    
+    # Keep observer in background thread
+    threading.Thread(target=observer.join, daemon=True).start()
+    
     return f"Watching folder: {folder}"
 
-def schedule_task(**kwargs):
+def schedule_task(**kwargs) -> str:
     """
-    Schedule a function to run at a certain time
+    Schedule a function to run after a delay in seconds.
+    
     kwargs:
-        func: callable
-        delay: int - seconds
+        func: callable - function to execute
+        delay: int - seconds to wait before execution (default: 5)
+    Returns:
+        str status message
     """
     func = kwargs.get("func")
     delay = kwargs.get("delay", 5)
+
     if not callable(func):
-        return "Function not callable"
+        return "Error: Provided func is not callable."
+    
     scheduler.enter(delay, 1, func)
-    threading.Thread(target=scheduler.run).start()
-    return f"Task scheduled in {delay} seconds"
+    
+    # Run scheduler in a background thread if not already running
+    threading.Thread(target=scheduler.run, daemon=True).start()
+    
+    return f"Task scheduled to run in {delay} seconds"
 
 
-def smart_decide(**kwargs):
+def smart_decide(**kwargs) -> str:
     """
-    Use previous results to suggest next steps
+    Suggest next steps or actions based on provided context using Groq.
+    
     kwargs:
-        context: str
+        context: str - textual context or previous results to base decisions on
+    Returns:
+        str - suggested next steps
     """
     context = kwargs.get("context", "")
-    instructions = "Suggest next logical task steps based on this context."
-    return groq_answer(instructions, context)
+    if not context.strip():
+        return "No context provided for decision-making."
+    
+    instructions = "Analyze the following context and suggest the next logical task or step."
+    try:
+        suggestion = groq_answer(instructions, context)
+        return suggestion
+    except Exception as e:
+        _print_err(f"smart_decide failed: {e}")
+        return "Decision-making failed due to an internal error."
+
 
 def encrypt_file(**kwargs):
     """
@@ -2475,6 +3165,31 @@ def encrypt_file(**kwargs):
         return str(enc_path)
     except Exception as e:
         return f"Failed to encrypt file: {e}"
+    
+def decrypt_file(**kwargs):
+    """
+    Simple XOR file decryption (reverse of encrypt_file)
+    kwargs:
+        path: str - path to encrypted file
+        key: int - encryption key used (default 123)
+    Returns:
+        str - path to decrypted file or error message
+    """
+    path = kwargs.get("path")
+    key = kwargs.get("key", 123)
+    if not path or not os.path.exists(path):
+        return "File path invalid"
+    try:
+        with open(path, "rb") as f:
+            data = bytearray(f.read())
+        data = bytearray(b ^ key for b in data)
+        dec_path = Path(path).with_suffix(".dec")
+        with open(dec_path, "wb") as f:
+            f.write(data)
+        return str(dec_path)
+    except Exception as e:
+        return f"Failed to decrypt file: {e}"
+
     
 def clean_clipboard(**kwargs):
     """
@@ -2523,7 +3238,7 @@ def focus_window(title_contains: str, retries: int = 3, delay: float = 1.0, **kw
     # --- 1. Locate the Window (Cross-Platform via pygetwindow) ---
     for _ in range(retries):
         try:
-            windows: List[gw.Win32Window] = gw.getWindowsWithTitle(title_contains)
+            windows: list = gw.getWindowsWithTitle(title_contains)
             if windows:
                 target_window = windows[0]
                 break
@@ -2536,7 +3251,6 @@ def focus_window(title_contains: str, retries: int = 3, delay: float = 1.0, **kw
 
     # --- 2. Focus the Window (Platform-Specific Activation) ---
     
-    # Windows: pygetwindow's activate() method is highly reliable here.
     if IS_WINDOWS:
         try:
             target_window.activate()
@@ -2545,14 +3259,9 @@ def focus_window(title_contains: str, retries: int = 3, delay: float = 1.0, **kw
             _print_err(f"Windows focus failed: {e}")
             return f"Error focusing window (Windows): {e}"
 
-    # macOS: Use osascript to focus the application associated with the window.
     elif IS_MACOS:
         try:
-            # osascript requires the application name, not just the window title.
-            # We assume the window title contains the app name, or we rely on a known list.
-            # A common approach is to extract the application name from the title (e.g., 'Google Chrome - My Page' -> 'Google Chrome')
             app_name = target_window.title.split(' - ')[0] if ' - ' in target_window.title else target_window.title
-            
             script = f"""
             tell application "{app_name}"
                 activate
@@ -2564,30 +3273,22 @@ def focus_window(title_contains: str, retries: int = 3, delay: float = 1.0, **kw
             _print_err(f"macOS focus failed: {e}")
             return f"Error focusing application (macOS): {e}"
 
-    # Linux: Use wmctrl command (standard for X Window System management)
     elif IS_LINUX:
         if not shutil.which("wmctrl"):
             return "Error: wmctrl command not found. Cannot focus window on Linux."
-            
         try:
-            # 1. Get the list of all windows from wmctrl
             result = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True, check=True)
             window_id = None
-            
-            # 2. Find the window ID matching the title
             for line in result.stdout.splitlines():
                 parts = line.split(maxsplit=4)
                 if len(parts) == 5 and title_contains.lower() in parts[4].lower():
                     window_id = parts[0]
                     break
-            
             if window_id:
-                # 3. Use wmctrl to activate the window by ID
                 subprocess.run(["wmctrl", "-i", "-a", window_id], check=True, capture_output=True, timeout=5)
                 return f"Successfully focused window (Linux - wmctrl): {target_window.title}"
             else:
-                 return f"Error: Could not determine window ID for '{title_contains}'."
-
+                return f"Error: Could not determine window ID for '{title_contains}'."
         except subprocess.CalledProcessError as e:
             _print_err(f"wmctrl failed: {e}")
             return f"Error focusing window (Linux - wmctrl): {e}"
@@ -2596,6 +3297,7 @@ def focus_window(title_contains: str, retries: int = 3, delay: float = 1.0, **kw
             return f"Error focusing window (Linux): {e}"
 
     return "Window focus not supported on this operating system."
+
 # ------------------ GUI INTERACTIONS ------------------
 def click(x: Optional[int] = None, y: Optional[int] = None, clicks: int = 1, interval: float = 0.2, **kwargs):
     try:
@@ -2656,8 +3358,7 @@ def copy_to_clipboard(text: str, **kwargs):
 
 def paste_from_clipboard(**kwargs):
     try:
-        text = pyperclip.paste()
-        return text
+        return pyperclip.paste()
     except Exception as e:
         _print_err(f"Clipboard paste failed → {e}")
         return ""
@@ -2678,50 +3379,22 @@ def scroll(amount: int, **kwargs):
     except Exception as e:
         _print_err(f"Scroll failed → {e}")
         return False
-    
 
 def get_screen_size(**kwargs) -> Tuple[int, int]:
     return pyautogui.size()
 
 def get_window_position(title_contains: str, **kwargs) -> Optional[Tuple[int, int, int, int]]:
-    """
-    Retrieves the position and size (left, top, width, height) of the first
-    window whose title contains the given string.
-    
-    Returns: A tuple (left, top, width, height) or None if not found/error.
-    Requires: 'pygetwindow' library.
-    """
     if gw is None:
         _print_err("pygetwindow required for get_window_position.")
         return None
-        
-    found_window = None
-
-    # --- 1. Locate the Window (Cross-Platform via pygetwindow) ---
     try:
         windows = gw.getWindowsWithTitle(title_contains)
-        if windows:
-            found_window = windows[0]
-        else:
-            return None # Window not found
-            
+        if not windows:
+            return None
+        w = windows[0]
+        return w.left, w.top, w.width, w.height
     except Exception as e:
-        _print_err(f"Window search failed: {e}")
-        return None
-
-    # --- 2. Retrieve Position/Size ---
-    try:
-        # These properties are derived from platform-specific APIs by pygetwindow.
-        return (
-            found_window.left, 
-            found_window.top, 
-            found_window.width, 
-            found_window.height
-        )
-    except Exception as e:
-        # This catch handles errors during retrieval (common on Linux/macOS
-        # if the window is minimized or permissions are restricted).
-        _print_err(f"Could not retrieve position for '{found_window.title}': {e}")
+        _print_err(f"Could not retrieve window position: {e}")
         return None
 
 def take_screenshot(path: str = None, **kwargs):
@@ -2731,39 +3404,18 @@ def take_screenshot(path: str = None, **kwargs):
     return screenshot
 
 def wait_for_window(title_contains: str, timeout: int = 10, **kwargs) -> bool:
-    """
-    Waits until a window whose title contains the given string appears, 
-    or until the timeout is reached.
-    
-    Returns: True if the window is found, False otherwise.
-    Requires: 'pygetwindow' library.
-    """
     if gw is None:
-        _print_err("The 'pygetwindow' library is required but not installed.")
+        _print_err("pygetwindow library is required.")
         return False
-        
     start = time.time()
-    sleep_interval = 0.5 # Check every half-second
-    
-    _print_err(f"Waiting for window containing '{title_contains}' (Timeout: {timeout}s)...")
-    
     while time.time() - start < timeout:
         try:
-            # Use the cross-platform window search provided by pygetwindow
-            windows: List[gw.Win32Window] = gw.getWindowsWithTitle(title_contains)
-            
+            windows = gw.getWindowsWithTitle(title_contains)
             if windows:
-                # Window found
                 return True
-                
         except Exception as e:
-            # Catch errors that might occur during window enumeration (permissions, display issues)
             _print_err(f"Error during window check: {e}")
-            # Do not return False immediately, keep retrying until timeout
-            
-        time.sleep(sleep_interval)
-        
-    # Timeout reached
+        time.sleep(0.5)
     return False
 
 def wait_for_image(image_path: str, timeout: int = 10, confidence: float = 0.8, **kwargs) -> bool:
@@ -2775,7 +3427,6 @@ def wait_for_image(image_path: str, timeout: int = 10, confidence: float = 0.8, 
         time.sleep(0.5)
     return False
 
-# --- Image-based GUI Automation ---
 def click_image(image_path: str, confidence: float = 0.8, **kwargs):
     pos = pyautogui.locateCenterOnScreen(image_path, confidence=confidence)
     if pos:
@@ -2808,26 +3459,14 @@ def highlight_image(image_path: str, duration: float = 1.0, confidence: float = 
         return True
     return False
 
-# --- Dynamic Element Interaction ---
 def click_text(text: str, **kwargs):
-    # Placeholder: requires OCR or external tool; excluded per your request
     print(f"[INFO] click_text called for '{text}'")
     return True
 
 def drag_text(text: str, target_x: int, target_y: int, **kwargs):
-    # Placeholder
     print(f"[INFO] drag_text called for '{text}' to ({target_x},{target_y})")
     return True
 
-# --- Multi-step / Macro Automation ---
-def record_macro(file_path: str, duration: int = 10, **kwargs):
-    # Simple mouse+keyboard recording placeholder
-    print(f"[INFO] Recording macro for {duration}s → {file_path}")
-    return True
-
-def play_macro(file_path: str, **kwargs):
-    print(f"[INFO] Playing macro from {file_path}")
-    return True
 
 def repeat_macro(file_path: str, times: int = 1, **kwargs):
     for i in range(times):
@@ -2995,37 +3634,6 @@ def minimize_window(title_contains: str, **kwargs) -> bool:
         
     return False # Window not found
 
-PLUGINS_FOLDER = Path(__file__).parent / "plugins"
-
-def load_plugins(skill_engine):
-    """
-    Automatically loads all Python files in the plugins folder,
-    finds all top-level functions, and registers them as skills.
-    Errors are caught and printed without stopping the loader.
-    """
-    for file in PLUGINS_FOLDER.glob("*.py"):
-        try:
-            spec = importlib.util.spec_from_file_location(file.stem, file)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-
-            # Inspect module for all functions
-            for name, fn in inspect.getmembers(mod, inspect.isfunction):
-                skill_name = f"{file.stem}_{name}"  # optional: namespace by file
-                skill_engine.add_skill(skill_name, fn)
-                print(f"[PLUGIN SKILL LOADED] {skill_name}")
-
-        except Exception as e:
-            print(f"[PLUGIN ERROR] Failed to load {file.name}: {e}")
-            traceback.print_exc()
-
-# --- Safe skill wrapper ---
-def reload_plugins_skill(**kwargs):
-    """
-    Reload all plugins at runtime as a skill.
-    """
-    load_plugins(skill)
-    return "[PLUGIN SYSTEM] All plugins reloaded successfully."
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
@@ -3086,7 +3694,7 @@ def upload_to_drive(**kwargs):
 def send_whatsapp_message(**kwargs):
     """
     kwargs:
-        phone (str) – international format
+        phone (str) - international format
         message (str)
     """
     phone = _kw(kwargs, "phone")
@@ -3203,27 +3811,20 @@ def os_context_skill(**kwargs):
     return output
 
 
-def predictive_tasks(*, last_tasks=None, os_context=None, n=10, **kwargs):
-    """
-    Predicts next likely tasks based on last N tasks and current OS context.
-    """
-    last_tasks = last_tasks or get_recent_tasks(n=n)
-    os_context = os_context or skill.execute("os_context")
-    prompt = f"Given last tasks {last_tasks} and context {os_context}, suggest likely next commands."
-    suggestion = groq_answer(prompt)
-    try:
-        return json.loads(suggestion)
-    except Exception:
-        return []
-
 def learn_user_pattern(task_name):
     """Update long-term patterns based on task frequency."""
+
     recent = get_recent_tasks(limit=20)
     freq = sum(1 for t in recent if t["function"] == task_name)
     if freq > 3:
         print(f"[LEARNING] Task '{task_name}' is now prioritized for automation.")
 
-nlp_model = spacy.load("en_core_web_sm")
+nlp_model = None
+if SPACY_AVAILABLE:
+    try:
+        nlp_model = spacy.load("en_core_web_sm")
+    except (OSError, IOError):
+        nlp_model = None
 
 def repair_input(user_input: str) -> str:
     """
@@ -3238,6 +3839,8 @@ def extract_entities(user_input: str) -> dict:
     """
     Extracts named entities (dates, times, people, apps) from text.
     """
+    if nlp_model is None:
+        return {}
     doc = nlp_model(user_input)
     entities = {}
     for ent in doc.ents:
@@ -3303,34 +3906,33 @@ MAX_RETRIES = 5
 def adaptive_auto_coder(user_request: str, context: str = None):
     """
     Fully adaptive auto-coder for NLP commands:
-    - Uses Groq to generate safe Python code
-    - Automatically splits tasks into multiple steps
-    - Infers parameters from user input
+    - Converts natural language tasks into Python code
+    - Can execute GUI automation, browser/app launching, and safe OS commands
+    - Splits multi-step tasks automatically
     - Retries and fixes code if errors occur
-    - Dynamically registers new skills for future use with unique names
+    Restrictions:
+    - NO file/folder deletion
+    - NO shutdown/reboot commands
     """
-
     if not user_request.strip():
         return "[ERROR] Empty request"
 
     last_error = None
-
-    # Include context from previous tasks if available
     context_prefix = f"Previous context:\n{context}\n" if context else ""
 
     base_prompt = f"""
     {context_prefix}
     You are an expert Windows automation engineer.
-    
+
     Convert the following user request into SAFE Python 3.13 code:
     User request: "{user_request}"
-    
+
     Requirements:
     - Output ONLY Python code (no markdown, no explanations)
-    - Use pyautogui, time.sleep, or other safe libraries as needed
+    - You may use pyautogui, time, subprocess, webbrowser, or other safe libraries
     - Split multi-step commands into separate executable functions
     - Name functions clearly and infer parameters automatically
-    - Avoid dangerous system commands (deletion, shutdown, etc.)
+    - Avoid dangerous commands like deletion, shutdown, or formatting
     """
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -3342,27 +3944,23 @@ def adaptive_auto_coder(user_request: str, context: str = None):
         code = re.sub(r"```.*?```", "", code, flags=re.DOTALL).strip()
 
         try:
-            # Run code in controlled globals
+            # Execute code in safe environment
+            safe_globals = {
+                "__builtins__": __builtins__,
+                "pyautogui": pyautogui,
+                "time": time,
+                "webbrowser": webbrowser,
+                "subprocess": subprocess
+            }
             local_env = {}
-            exec_safe(code, {"__builtins__": __builtins__, "pyautogui": pyautogui, "time": time}, local_env)
+            exec_safe(code, safe_globals, local_env)
+
             print(f"[AUTO-CODER EXECUTED] Attempt {attempt}")
-
-            # Detect all functions in the generated code
-            generated_funcs = {name: fn for name, fn in local_env.items() if callable(fn)}
-
-            # Register each as a new skill with a unique name
-            for name, fn in generated_funcs.items():
-                skill_name = _make_skill_name(name)
-                skill.add_skill(skill_name, fn)
-                print(f"[SKILL LEARNED] → {skill_name}")
-
-            return f"Task executed and {len(generated_funcs)} skill(s) learned."
+            return f"✅ Task executed successfully."
 
         except Exception as e:
             last_error = str(e)
             print(f"[AUTO-CODER ERROR {attempt}] {last_error}")
-
-            # Provide error back to Groq for fix
             base_prompt += f"""
             The previous code attempt failed with error:
             {last_error}
@@ -3383,16 +3981,16 @@ SAFE_BUILTINS = {
     "set": set,
 }
 
-def exec_safe(code: str, extra_globals=None):
-    """Execute Python code safely with limited builtins"""
-    env = {"__builtins__": SAFE_BUILTINS}
-    if extra_globals:
-        env.update(extra_globals)
+def exec_safe(command, raw_input=None, timeout=5, **kwargs):
+    """
+    Safe command execution wrapper.
+    Compatible with SkillRegistry.
+    """
     try:
-        exec(code, env)
+        return os.system(command)
     except Exception as e:
-        return f"[SECURITY] Code execution blocked or failed: {e}"
-    return "Executed safely"
+        return str(e)
+
 
 def window_finder(**kwargs):
     title = kwargs.get("title") or kwargs.get("raw_input")
@@ -3476,11 +4074,25 @@ def check_process_status(**kwargs):
 def file_manager(**kwargs):
     # Requires shutil and pathlib
     action = kwargs.get("action")
-    source = Path(kwargs.get("source"))
-    destination = Path(kwargs.get("destination"))
-
+    source_str = kwargs.get("source")
+    destination_str = kwargs.get("destination")
+    
+    if not action:
+        return "Please provide an 'action' parameter: 'copy', 'move', or 'delete'."
+    
     if action not in ["copy", "move", "delete"]:
         return "Invalid action. Use 'copy', 'move', or 'delete'."
+    
+    if not source_str:
+        return "Please provide a 'source' parameter."
+    
+    source = Path(source_str)
+    
+    if action in ["copy", "move"] and not destination_str:
+        return f"Please provide a 'destination' parameter for '{action}' action."
+    
+    if action in ["copy", "move"]:
+        destination = Path(destination_str)
     
     if not source.exists():
         return f"Source file/folder not found: {source.name}"
@@ -4390,228 +5002,6 @@ def run_sophos_central_health_analysis(**kwargs):
     except Exception as e:
         return {"error": str(e)}
 
-def llm_judge_answer(prompt):
-    return llm_run("BAAI.JudgeLM-7B-v1.0.Q4_K_M.gguf", prompt)
-
-def llm_truth_check(prompt):
-    return llm_run("truthfulqa-truth-judge-llama2-7b.gguf", prompt)
-
-def llm_deep_reason(prompt):
-    return llm_run("DeepSeek-R1-Distill-Qwen-7B-Q4_1.gguf", prompt)
-
-def llm_experimental_reason(prompt):
-    return llm_run("xwin-lm-7b-v0.2.Q4_K_M.gguf", prompt)
-
-def llm_solve_math(prompt):
-    return llm_run("deepseek-math-7b-rl.Q4_K_M.gguf", prompt)
-
-def llm_code(prompt):
-    return llm_run("qwen2.5-coder-7b-instruct-q4_k_m.gguf", prompt)
-
-def llm_biomedical(prompt):
-    return llm_run("BioMedLM-7B.Q4_K_M.gguf", prompt)
-
-def llm_legal(prompt):
-    return llm_run("legal-llama-3-unsloth.Q4_K_M.gguf", prompt)
-
-def llm_casual_chat(prompt):
-    return llm_run("baichuan2-7b-chat.Q4_K_M.gguf", prompt)
-
-def llm_friendly_chat(prompt):
-    return llm_run("openbuddy-zephyr-7b-v14.1.Q4_K_M.gguf", prompt)
-
-def llm_open_discussion(prompt):
-    return llm_run("OpenAssistant-falcon-7b-sft-top1.gguf", prompt)
-
-def llm_creative_write(prompt):
-    return llm_run("gemma-7b.Q4_K_M.gguf", prompt)
-
-def llm_multilingual(prompt):
-    return llm_run("internlm2-chat-7B.Q4_K_M.gguf", prompt)
-
-def llm_world_knowledge(prompt):
-    return llm_run("Yi-1.5-9B-Chat-Q4_K_M.gguf", prompt)
-
-def llm_function_call(prompt):
-    return llm_run("llama-2-7b-function-calling.Q3_K_M.gguf", prompt)
-
-def llm_ultra_fast(prompt):
-    return llm_run("orca-mini-3b-gguf2-q4_0.gguf", prompt)
-
-def llm_micro_tasks(prompt):
-    return llm_run("MiniCPM-2B-dpo-fp32.Q4_K_M.gguf", prompt)
-
-def llm_compact_reason(prompt):
-    return llm_run("Phi-3-mini-4k-instruct-q4.gguf", prompt)
-
-def llm_general_assistant(prompt):
-    return llm_run("Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", prompt)
-
-def llm_precise_instruction(prompt):
-    return llm_run("qwen2.5-7b-instruct-q4_k_m.gguf", prompt)
-
-def llm_lightweight_instruction(prompt):
-    return llm_run("qwen2.5-3b-instruct-q4_k_m.gguf", prompt)
-
-def llm_base_research(prompt):
-    return llm_run("s1-Qwen2.5-Base-7B.i1-Q4_K_M.gguf", prompt)
-
-def llm_synthetic_data(prompt):
-    return llm_run("synthia-7b.Q4_0.gguf", prompt)
-
-def llm_long_context(prompt):
-    return llm_run("mpt-7b-8k-chat.Q4_K_M.gguf", prompt, max_tokens=1024)
-
-def llm_supreme_intelligence(prompt):
-    return llm_run("qwen3-30b-a3b-q4_k_m.gguf", prompt, max_tokens=1024)
-
-############################################################
-# Register all Skills
-############################################################
-
-skill.add_skill("ocr", skill_wrapper(ocr))
-skill.add_skill("ocr_screen", skill_wrapper(ocr_screen))
-skill.add_skill("translate_image", skill_wrapper(translate_image))
-skill.add_skill("clear_recycle_bin", skill_wrapper(clear_recycle_bin))
-skill.add_skill("lock_screen", skill_wrapper(lock_screen))
-skill.add_skill("translate_document", skill_wrapper(translate_document))
-skill.add_skill("s_h", skill_wrapper(s_h))
-skill.add_skill("natural_alarm_ai", skill_wrapper(natural_alarm_ai))
-skill.add_skill("youtube_summarizer", skill_wrapper(youtube_summarizer))
-skill.add_skill("ytDownloader", skill_wrapper(ytDownloader))
-skill.add_skill("playMusic", skill_wrapper(playMusic))
-skill.add_skill("qrCodeGenerator", skill_wrapper(qrCodeGenerator))
-skill.add_skill("read_pdf", skill_wrapper(read_pdf))
-skill.add_skill("file_organizer", skill_wrapper(file_organizer))
-skill.add_skill("transcribe_audio", skill_wrapper(transcribe_audio))
-skill.add_skill("download_images", skill_wrapper(download_images))
-skill.add_skill("create_file", skill_wrapper(create_file))
-skill.add_skill("display_top_processes", skill_wrapper(display_top_processes))
-skill.add_skill("change_wallpaper", skill_wrapper(change_wallpaper))
-skill.add_skill("analyze_and_report", skill_wrapper(analyze_and_report))
-skill.add_skill("send_email", skill_wrapper(send_email))
-skill.add_skill("send_multiple_emails", skill_wrapper(send_multiple_emails))
-skill.add_skill("open_file", skill_wrapper(open_file))
-skill.add_skill("dim_light", skill_wrapper(dim_light))
-skill.add_skill("internet_speed", skill_wrapper(internet_speed))
-skill.add_skill("create_system_restore_point", skill_wrapper(create_system_restore_point))
-skill.add_skill("find_and_delete_duplicates", skill_wrapper(find_and_delete_duplicates))
-skill.add_skill("smart_battery", skill_wrapper(smart_battery))
-skill.add_skill("yt_search", skill_wrapper(yt_search))
-skill.add_skill("openappweb", skill_wrapper(openappweb))
-skill.add_skill("closeappweb", skill_wrapper(closeappweb))
-skill.add_skill("summarize_excel_with_groq", skill_wrapper(summarize_excel_with_groq))
-skill.add_skill("melody", skill_wrapper(melody))
-skill.add_skill("record_macro", skill_wrapper(record_macro))
-skill.add_skill("play_macro", skill_wrapper(play_macro))
-skill.add_skill("adaptive_auto_coder", skill_wrapper(adaptive_auto_coder))
-skill.add_skill("run_task", skill_wrapper(run_task_parallel))
-skill.add_skill("fetch_page", skill_wrapper(fetch_page))
-skill.add_skill("get_page_title", skill_wrapper(get_page_title))
-skill.add_skill("get_meta_description", skill_wrapper(get_meta_description))
-skill.add_skill("search_google", skill_wrapper(search_google))
-skill.add_skill("extract_links", skill_wrapper(extract_links))
-skill.add_skill("get_text_content", skill_wrapper(get_text_content))
-skill.add_skill("summarize_pdf", skill_wrapper(summarize_pdf))
-skill.add_skill("analyze_data", skill_wrapper(analyze_data))
-skill.add_skill("plot_data", skill_wrapper(plot_data))
-skill.add_skill("convert_text_to_pdf", skill_wrapper(convert_text_to_pdf))
-skill.add_skill("summarize_text", skill_wrapper(summarize_text))
-skill.add_skill("sentiment_analysis", skill_wrapper(sentiment_analysis))
-skill.add_skill("nlp_qna", skill_wrapper(nlp_qna))
-skill.add_skill("schedule_task", skill_wrapper(schedule_task))
-skill.add_skill("generate_chart_from_data", skill_wrapper(generate_chart_from_data))
-skill.add_skill("analyze_image", skill_wrapper(analyze_image))
-skill.add_skill("generate_report", skill_wrapper(generate_report))
-skill.add_skill("watch_folder", skill_wrapper(watch_folder))
-skill.add_skill("smart_decide", skill_wrapper(smart_decide))
-skill.add_skill("encrypt_file", skill_wrapper(encrypt_file))
-skill.add_skill("clean_clipboard", skill_wrapper(clean_clipboard))
-skill.add_skill("auto_backup", skill_wrapper(auto_backup))
-skill.add_skill("reload_plugins", skill_wrapper(reload_plugins_skill))
-skill.add_skill("focus_window", skill_wrapper(focus_window))
-skill.add_skill("click", skill_wrapper(click))
-skill.add_skill("double_click", skill_wrapper(double_click))
-skill.add_skill("right_click", skill_wrapper(right_click))
-skill.add_skill("type_text", skill_wrapper(type_text))
-skill.add_skill("press_key", skill_wrapper(press_key))
-skill.add_skill("hotkey", skill_wrapper(hotkey))
-skill.add_skill("copy_to_clipboard", skill_wrapper(copy_to_clipboard))
-skill.add_skill("paste_from_clipboard", skill_wrapper(paste_from_clipboard))
-skill.add_skill("drag", skill_wrapper(drag))
-skill.add_skill("scroll", skill_wrapper(scroll))
-skill.add_skill("get_screen_size", skill_wrapper(get_screen_size))
-skill.add_skill("get_window_position", skill_wrapper(get_window_position))
-skill.add_skill("take_screenshot", skill_wrapper(take_screenshot))
-skill.add_skill("wait_for_window", skill_wrapper(wait_for_window))
-skill.add_skill("wait_for_image", skill_wrapper(wait_for_image))
-skill.add_skill("click_image", skill_wrapper(click_image))
-skill.add_skill("double_click_image", skill_wrapper(double_click_image))
-skill.add_skill("drag_image", skill_wrapper(drag_image))
-skill.add_skill("highlight_image", skill_wrapper(highlight_image))
-skill.add_skill("click_text", skill_wrapper(click_text))
-skill.add_skill("drag_text", skill_wrapper(drag_text))
-skill.add_skill("repeat_macro", skill_wrapper(repeat_macro))
-skill.add_skill("chain_commands", skill_wrapper(chain_commands))
-skill.add_skill("safe_click", skill_wrapper(safe_click))
-skill.add_skill("safe_type", skill_wrapper(safe_type))
-skill.add_skill("backup_clipboard", skill_wrapper(backup_clipboard))
-skill.add_skill("restore_clipboard", skill_wrapper(restore_clipboard))
-skill.add_skill("move_cursor_to_image", skill_wrapper(move_cursor_to_image))
-skill.add_skill("center_window", skill_wrapper(center_window))
-skill.add_skill("maximize_window", skill_wrapper(maximize_window))
-skill.add_skill("minimize_window", skill_wrapper(minimize_window))
-skill.add_skill("schedule_calendar", skill_wrapper(schedule_calendar_event))
-skill.add_skill("upload_to_drive", skill_wrapper(upload_to_drive))
-skill.add_skill("send_discord_message", skill_wrapper(send_discord_message))
-skill.add_skill("send_whatsapp_message", skill_wrapper(send_whatsapp_message))
-skill.add_skill("os_context", skill_wrapper(os_context_skill))
-skill.add_skill("predictive_tasks", skill_wrapper(predictive_tasks))
-skill.add_skill("exec_safe", skill_wrapper(exec_safe))
-skill.add_skill("window_finder", skill_wrapper(window_finder))
-skill.add_skill("file_finder", skill_wrapper(file_finder))
-skill.add_skill("check_process_status", skill_wrapper(check_process_status))
-skill.add_skill("file_manager", skill_wrapper(file_manager))
-skill.add_skill("video_to_audio", skill_wrapper(video_to_audio))
-skill.add_skill("bg_remover", skill_wrapper(bg_remover))
-skill.add_skill("wordcloud_generator", skill_wrapper(wordcloud_generator))
-skill.add_skill("instagram_video_downloader", skill_wrapper(instagram_video_downloader))
-skill.add_skill("facebook_video_downloader", skill_wrapper(facebook_video_downloader))
-skill.add_skill("xml_to_csv_converter", skill_wrapper(xml_to_csv_converter))
-skill.add_skill("malware_static_analyzer", skill_wrapper(malware_static_analyzer))
-skill.add_skill("track_amazon_product_price", skill_wrapper(track_price))
-skill.add_skill("remember_birthday", skill_wrapper(remember_birthday))
-skill.add_skill("check_birthdays", skill_wrapper(check_birthdays))
-skill.add_skill("download_email_attachments", skill_wrapper(download_attachments))
-skill.add_skill("scrape_best_sellers", skill_wrapper(scrape_best_sellers))
-skill.add_skill("aws_control", skill_wrapper(aws_control))
-skill.add_skill("plot_spectrogram", skill_wrapper(plot_spectrogram))
-skill.add_skill("csv_to_excel", skill_wrapper(csv_to_excel))
-skill.add_skill("ip_geolocator", skill_wrapper(ip_geolocator))
-skill.add_skill("speaker_health_test", skill_wrapper(speaker_health_test_skill))
-skill.add_skill("run_sophos_central_health_analysis", skill_wrapper(run_sophos_central_health_analysis))
-skill.add_skill("llm_judge_answer", skill_wrapper(llm_judge_answer))
-skill.add_skill("llm_truth_check", skill_wrapper(llm_truth_check))
-skill.add_skill("llm_deep_reason", skill_wrapper(llm_deep_reason))
-skill.add_skill("llm_experimental_reason", skill_wrapper(llm_experimental_reason))
-skill.add_skill("llm_solve_math", skill_wrapper(llm_solve_math))
-skill.add_skill("llm_code", skill_wrapper(llm_code))
-skill.add_skill("llm_biomedical", skill_wrapper(llm_biomedical))
-skill.add_skill("llm_legal", skill_wrapper(llm_legal))
-skill.add_skill("llm_casual_chat", skill_wrapper(llm_casual_chat))
-skill.add_skill("llm_friendly_chat", skill_wrapper(llm_friendly_chat))
-skill.add_skill("llm_open_discussion", skill_wrapper(llm_open_discussion))
-skill.add_skill("llm_creative_write", skill_wrapper(llm_creative_write))
-skill.add_skill("llm_multilingual", skill_wrapper(llm_multilingual))
-skill.add_skill("llm_world_knowledge", skill_wrapper(llm_world_knowledge))
-skill.add_skill("llm_function_call", skill_wrapper(llm_function_call))
-skill.add_skill("llm_ultra_fast", skill_wrapper(llm_ultra_fast))
-skill.add_skill("llm_micro_tasks", skill_wrapper(llm_micro_tasks))
-skill.add_skill("llm_compact_reason", skill_wrapper(llm_compact_reason))
-skill.add_skill("llm_general_assistant", skill_wrapper(llm_general_assistant))
-skill.add_skill("llm_precise_instruction", skill_wrapper(llm_precise_instruction))
-skill.add_skill("llm_lightweight_instruction", skill_wrapper(llm_lightweight_instruction))
-skill.add_skill("llm_base_research", skill_wrapper(llm_base_research))
 
 
 
